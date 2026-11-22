@@ -1,0 +1,10 @@
+node_modules/
+**/dist/
+apps/web/public/duckdb/*.wasm
+apps/web/public/duckdb/*.worker.js
+coverage/
+.vite/
+*.tsbuildinfo
+.DS_Store
+playwright-report/
+test-results/

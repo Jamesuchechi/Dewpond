@@ -1,0 +1,115 @@
+:root {
+  color-scheme: dark;
+  --bg: #0b1117;
+  --surface: #131c26;
+  --border: #253445;
+  --text: #e6edf3;
+  --muted: #93a4b7;
+  --accent: #38bdf8;
+  --accent-ink: #04131c;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family:
+    system-ui,
+    -apple-system,
+    BlinkMacSystemFont,
+    'Segoe UI',
+    sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.55;
+}
+
+.dp-landing {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 4rem 1.5rem 5rem;
+}
+
+.dp-kicker {
+  margin: 0 0 0.75rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+.dp-hero h1 {
+  margin: 0 0 1rem;
+  font-size: clamp(2rem, 4vw, 3rem);
+  line-height: 1.15;
+}
+
+.dp-subtitle {
+  margin: 0 0 1.75rem;
+  max-width: 68ch;
+  font-size: 1.1rem;
+  color: var(--muted);
+}
+
+.dp-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+
+.dp-btn {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.7rem 1.2rem;
+  border-radius: 8px;
+  font-weight: 600;
+  text-decoration: none;
+  border: 1px solid var(--border);
+}
+
+.dp-btn-primary {
+  background: var(--accent);
+  color: var(--accent-ink);
+  border-color: var(--accent);
+}
+
+.dp-btn-secondary {
+  color: var(--text);
+  background: var(--surface);
+}
+
+.dp-meta,
+.dp-honest {
+  color: var(--muted);
+  font-size: 0.92rem;
+}
+
+.dp-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 1rem;
+  margin: 2.5rem 0;
+}
+
+.dp-card,
+.dp-audit {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1.25rem;
+}
+
+.dp-card h2,
+.dp-audit h2 {
+  margin-top: 0;
+  font-size: 1.05rem;
+}
+
+code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.9em;
+}

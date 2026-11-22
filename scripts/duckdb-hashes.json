@@ -1,0 +1,22 @@
+{
+  "package": "@duckdb/duckdb-wasm",
+  "version": "1.32.0",
+  "files": {
+    "duckdb-eh.wasm": {
+      "bytes": 34242586,
+      "sha256": "4c221bfa59c11f24dbd750e70c90b9252eca6eec5633936e6a2ec766e55fd879"
+    },
+    "duckdb-browser-eh.worker.js": {
+      "bytes": 772759,
+      "sha256": "f8ab72b6b90b3ad83077d47426d4a99d5d9a4c7e07cba1a2be37d655adc7c1ab"
+    },
+    "duckdb-mvp.wasm": {
+      "bytes": 39362651,
+      "sha256": "45d72a81fba8e57693d890da837c7041310e385e75619a8559839b15388dfe97"
+    },
+    "duckdb-browser-mvp.worker.js": {
+      "bytes": 844644,
+      "sha256": "b0387027f174e2b60c2d5cfa31cecca9b89d8a9762346b6449a784cd1c4dde3c"
+    }
+  }
+}

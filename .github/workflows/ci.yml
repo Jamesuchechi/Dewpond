@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 12.18.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: 'pnpm'
+
+      - name: Install dependencies cleanly (no install scripts)
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Copy & SHA-256 verify self-hosted DuckDB-WASM 1.32.0 assets
+        run: pnpm run fetch:duckdb
+
+      - name: Lint
+        run: pnpm run lint
+
+      - name: Typecheck
+        run: pnpm run typecheck
+
+      - name: Unit & property tests
+        run: pnpm run test
+
+      - name: Build static Vite MPA
+        run: pnpm run build
+
+      - name: Verify built dist/ privacy & WASM digests
+        run: pnpm run verify:build
