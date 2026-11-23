@@ -1,18 +1,18 @@
 import { spawn } from 'node:child_process';
 import {
-  closeSync,
+  createReadStream,
+  createWriteStream,
   existsSync,
   mkdirSync,
   mkdtempSync,
-  openSync,
   rmSync,
   statSync,
   writeFileSync,
-  writeSync,
 } from 'node:fs';
+import { createServer } from 'node:http';
 import { createRequire } from 'node:module';
 import { homedir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, extname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium, firefox } from 'playwright-core';
 import { buildSyntheticXlsx } from '../packages/fixtures/src/xlsxBuilder.ts';
@@ -57,20 +57,105 @@ function buildFiftyMbFifteenColCsv(workDir) {
   };
 }
 
-async function generateFiveHundredMbParquet(workDir, previewUrl) {
+async function generateFiveHundredMbParquet(workDir) {
   const outFile = join(workDir, 'm1_500mb.parquet');
+  const require = createRequire(import.meta.url);
+  const arrowEntry = require.resolve('apache-arrow', {
+    paths: [join(ROOT_DIR, 'apps/web/node_modules')],
+  });
+  const arrowDir = dirname(arrowEntry);
+  const tslibEntry = require.resolve('tslib/tslib.es6.js', { paths: [arrowDir] });
+  const flatbuffersDir = dirname(
+    require.resolve('flatbuffers/mjs/flatbuffers.js', { paths: [arrowDir] }),
+  );
+  const duckdbDir = resolve(ROOT_DIR, 'apps/web/node_modules/@duckdb/duckdb-wasm/dist');
+  const publicDuckdbDir = resolve(ROOT_DIR, 'apps/web/public/duckdb');
+
+  const outStream = createWriteStream(outFile);
+  const server = createServer((req, res) => {
+    const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+    if (req.method === 'POST' && url.pathname === '/_chunk') {
+      req.on('data', (chunk) => outStream.write(chunk));
+      req.on('end', () => {
+        res.writeHead(204);
+        res.end();
+      });
+      return;
+    }
+    if (url.pathname === '/gen.html') {
+      res.writeHead(200, { 'Content-Type': 'text/html' });
+      res.end(`<!doctype html><html><body>
+        <script type="importmap">{"imports":{"apache-arrow":"/arrow/Arrow.dom.mjs","tslib":"/dep/tslib.es6.js","flatbuffers":"/flatbuffers/flatbuffers.js"}}</script>
+        <script type="module">
+          import * as duckdb from '/duckdb-dist/duckdb-browser.mjs';
+          window.__genDuck = duckdb;
+        </script>
+      </body></html>`);
+      return;
+    }
+
+    let filePath = null;
+    if (url.pathname === '/dep/tslib.es6.js') {
+      filePath = tslibEntry;
+    } else if (url.pathname.startsWith('/flatbuffers/')) {
+      filePath = resolve(flatbuffersDir, url.pathname.slice(13));
+    } else if (url.pathname.startsWith('/arrow/')) {
+      filePath = resolve(arrowDir, url.pathname.slice(7));
+    } else if (url.pathname.startsWith('/duckdb-dist/')) {
+      filePath = resolve(duckdbDir, url.pathname.slice(13));
+    } else if (url.pathname.startsWith('/duckdb/')) {
+      filePath = resolve(publicDuckdbDir, url.pathname.slice(8));
+    }
+
+    if (filePath && existsSync(filePath) && statSync(filePath).isFile()) {
+      const ext = extname(filePath);
+      const mime =
+        ext === '.mjs' || ext === '.js'
+          ? 'application/javascript'
+          : ext === '.wasm'
+            ? 'application/wasm'
+            : 'application/octet-stream';
+      res.writeHead(200, { 'Content-Type': mime });
+      createReadStream(filePath).pipe(res);
+      return;
+    }
+    res.writeHead(404);
+    res.end('Not found');
+  });
+
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const port = server.address().port;
+  const genUrl = `http://127.0.0.1:${port}`;
   const browser = await chromium.launch({ headless: true });
+
   try {
     const page = await browser.newPage();
-    await page.goto(`${previewUrl}/app/`, { waitUntil: 'networkidle' });
-    await page.getByRole('button', { name: 'Boot Engine' }).click();
-    await page.locator('.wb-engine-pill', { hasText: 'Ready (' }).waitFor({ timeout: 30000 });
+    page.on('pageerror', (err) => console.error('[gen.html pageerror]', err.message));
+    await page.goto(`${genUrl}/gen.html`, { waitUntil: 'networkidle' });
+    await page.waitForFunction(() => Boolean(window.__genDuck), { timeout: 15000 });
 
-    // Step 1: Benchmark exact snappy bytes per row using a 50k row sample
-    const sampleBytes = await page.evaluate(async () => {
-      const client = window.__dewpondClient;
-      await client.exec('INSTALL parquet; LOAD parquet;');
-      await client.exec(`
+    const result = await page.evaluate(async (origin) => {
+      const d = window.__genDuck;
+      const bundles = {
+        mvp: {
+          mainModule: `${origin}/duckdb/duckdb-mvp.wasm`,
+          mainWorker: `${origin}/duckdb/duckdb-browser-mvp.worker.js`,
+        },
+        eh: {
+          mainModule: `${origin}/duckdb/duckdb-eh.wasm`,
+          mainWorker: `${origin}/duckdb/duckdb-browser-eh.worker.js`,
+        },
+      };
+      const sel = await d.selectBundle(bundles);
+      const w = await d.createWorker(sel.mainWorker);
+      const db = new d.AsyncDuckDB(new d.VoidLogger(), w);
+      await db.instantiate(sel.mainModule, sel.pthreadWorker);
+      await db.open({ path: ':memory:' });
+      const c = await db.connect();
+      await c.query(`SET custom_extension_repository = '${origin}/duckdb/extensions';`);
+      await c.query('INSTALL parquet; LOAD parquet;');
+
+      await c.query(`
         COPY (
           SELECT
             'TX' || lpad(i::VARCHAR, 8, '0') AS tx_id,
@@ -85,20 +170,11 @@ async function generateFiveHundredMbParquet(workDir, previewUrl) {
           FROM range(50000) t(i)
         ) TO '_sample.parquet' (FORMAT PARQUET, COMPRESSION SNAPPY, ROW_GROUP_SIZE 50000);
       `);
-      return await client.enqueue(async (_conn, db) => {
-        const buf = await db.copyFileToBuffer('_sample.parquet');
-        await db.dropFile('_sample.parquet');
-        return buf.byteLength;
-      });
-    });
+      const sampleBuf = await db.copyFileToBuffer('_sample.parquet');
+      await db.dropFile('_sample.parquet');
+      const targetRows = Math.round((502 * 1024 * 1024) / (sampleBuf.byteLength / 50000));
 
-    const targetRows = Math.round((502 * 1024 * 1024) / (sampleBytes / 50000));
-    console.log(`Sample 50k rows: ${(sampleBytes / 1024 / 1024).toFixed(2)} MB. Target rows for ~502 MB: ${targetRows.toLocaleString('en-US')}`);
-
-    // Step 2: Generate the target parquet file in DuckDB and stream buffer in chunks to disk
-    await page.evaluate(async (rows) => {
-      const client = window.__dewpondClient;
-      await client.exec(`
+      await c.query(`
         COPY (
           SELECT
             'TX' || lpad(i::VARCHAR, 8, '0') AS tx_id,
@@ -110,43 +186,30 @@ async function generateFiveHundredMbParquet(workDir, previewUrl) {
             ((i % 50) + 1)::INTEGER AS qty,
             CASE i % 6 WHEN 0 THEN 'POS' WHEN 1 THEN 'NIP' WHEN 2 THEN 'USSD' WHEN 3 THEN 'Card' WHEN 4 THEN 'Web' ELSE 'Mobile' END AS channel,
             sha256(i::VARCHAR) || '_' || md5(i::VARCHAR) AS payload_sig
-          FROM range(${rows}) t(i)
+          FROM range(${targetRows}) t(i)
         ) TO '_full_500mb.parquet' (FORMAT PARQUET, COMPRESSION SNAPPY, ROW_GROUP_SIZE 100000);
       `);
-    }, targetRows);
 
-    // Retrieve the file buffer in 32 MB chunks to avoid any single-call serialization bottleneck
-    const totalFileSize = await page.evaluate(async () => {
-      const client = window.__dewpondClient;
-      return await client.enqueue(async (_conn, db) => {
-        const buf = await db.copyFileToBuffer('_full_500mb.parquet');
-        window.__dewpondParquetExport = new Uint8Array(buf);
-        return buf.byteLength;
-      });
-    });
+      const fullBuf = new Uint8Array(await db.copyFileToBuffer('_full_500mb.parquet'));
+      await db.dropFile('_full_500mb.parquet');
+      const chunkBytes = 32 * 1024 * 1024;
+      for (let off = 0; off < fullBuf.byteLength; off += chunkBytes) {
+        const slice = fullBuf.subarray(off, Math.min(off + chunkBytes, fullBuf.byteLength));
+        const res = await fetch(`${origin}/_chunk`, { method: 'POST', body: slice });
+        if (!res.ok) throw new Error(`Chunk upload failed: ${res.status}`);
+      }
 
-    const fd = openSync(outFile, 'w');
-    const chunkSize = 16 * 1024 * 1024; // 16 MB chunks
-    for (let offset = 0; offset < totalFileSize; offset += chunkSize) {
-      const chunkLen = Math.min(chunkSize, totalFileSize - offset);
-      const chunkBytes = await page.evaluate(
-        ({ off, len }) => {
-          const arr = window.__dewpondParquetExport.subarray(off, off + len);
-          return Array.from(arr);
-        },
-        { off: offset, len: chunkLen },
-      );
-      writeSync(fd, Buffer.from(chunkBytes));
-    }
-    closeSync(fd);
+      await c.close();
+      await db.terminate();
+      w.terminate();
+      return { rows: targetRows, bytes: fullBuf.byteLength };
+    }, genUrl);
 
-    await page.evaluate(() => {
-      delete window.__dewpondParquetExport;
-    });
-
-    return { filePath: outFile, bytes: statSync(outFile).size, rows: targetRows };
+    await new Promise((r) => outStream.end(r));
+    return { filePath: outFile, bytes: statSync(outFile).size, rows: result.rows };
   } finally {
     await browser.close();
+    server.close();
   }
 }
 
@@ -262,7 +325,7 @@ async function runM1Browser(name, browserType, fixtures) {
     await page.locator('.wb-uplot-spark canvas').first().waitFor({ timeout: 15000 });
 
     // (a2) Win-1252 CSV + _rejects quarantine test on demo dataset with amount -> DOUBLE
-    await page.getByRole('tab', { name: 'Unmess / Ingest' }).click();
+    await page.getByRole('tab', { name: 'Data Grid' }).click();
     await page.locator('input[type="file"]').setInputFiles(fixtures.xlsx.winPath);
     await page.locator('.wb-tag', { hasText: 'windows-1252' }).waitFor({ timeout: 10000 });
     await page.getByRole('button', { name: 'Commit Typed Load into DuckDB' }).click();
@@ -402,7 +465,7 @@ async function main() {
     console.log(
       `Built 50 MB CSV (${(fiftyMb.bytes / (1024 * 1024)).toFixed(2)} MB, ${fiftyMb.rows} rows). Generating 500 MB Parquet on NVMe via browser DuckDB...`,
     );
-    const parquet = await generateFiveHundredMbParquet(workDir, BASE_URL);
+    const parquet = await generateFiveHundredMbParquet(workDir);
     console.log(
       `Built 500 MB Snappy Parquet (${(parquet.bytes / (1024 * 1024)).toFixed(2)} MB, ${parquet.rows.toLocaleString('en-US')} rows).`,
     );

@@ -4,7 +4,7 @@ import type { GridColumnMeta, QueryTableResult } from '../app/arrowFormat';
 import type { ReplaySource } from '../workers/duckdb.client';
 
 export type EngineStatus = 'idle' | 'booting' | 'ready' | 'error';
-export type WorkbenchFeature = 'ingest' | 'profile' | 'clean' | 'query' | 'redact' | 'export';
+export type WorkbenchFeature = 'data' | 'profile' | 'clean' | 'query' | 'redact' | 'export';
 
 export interface LoadedTableMeta {
   id: string;
@@ -111,7 +111,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
   memoryBytes: 0,
   isBusy: false,
   busyLabel: null,
-  activeFeature: 'ingest',
+  activeFeature: 'data',
   baseTables: {},
   replaySources: {},
   tables: [],

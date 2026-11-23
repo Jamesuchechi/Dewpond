@@ -326,6 +326,61 @@ pre,
   padding: 1rem 1.15rem;
 }
 
+.wb-stage-full {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.wb-welcome-card {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+
+.wb-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  background: rgba(11, 21, 38, 0.56);
+  backdrop-filter: blur(3px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1.5rem;
+}
+
+.wb-modal-dialog {
+  width: min(980px, 100%);
+  max-height: calc(100vh - 3rem);
+  overflow-y: auto;
+  background: var(--wb-surface);
+  border: 1px solid var(--wb-border);
+  border-radius: 12px;
+  padding: 1.15rem 1.35rem;
+  box-shadow: 0 24px 64px rgba(11, 21, 38, 0.35);
+}
+
+.wb-modal-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 0.9rem;
+}
+
+.wb-modal-head h2 {
+  margin: 0 0 0.2rem;
+  font-size: 1.1rem;
+}
+
+.wb-modal-head p {
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--wb-text-2);
+}
+
 .wb-stage-header {
   display: flex;
   flex-wrap: wrap;

@@ -50,20 +50,20 @@ All Milestone S spikes (S1–S9) plus replacement verification checks (R1–R3) 
 
 ---
 
-## Milestone M1 — Unmess + Profile (Weeks 3–4, ⏱12.5d)
+## Milestone M1 — Unmess + Profile (Weeks 3–4, ⏱12.5d) (COMPLETED)
 
 ### Ingestion core (`packages/ingest`, pure TS + tests first)
-- [ ] P0 Format sniffer + compute-worker pre-normalizer (BOM strip, UTF-8/Windows-1252 transcode, mixed `\r\n`/`\r`, ragged row alignment) ⏱2d
-- [ ] P0 Sample-5k `all_varchar` SQL scorer (**strict `^[+-]?[0-9]+$` int regex**, leading-zero / ≥11-digit / ID-name vetoes, locale currency/EU decimals) ⏱2.5d
-- [ ] P0 Date ambiguity resolver (detect disambiguation; UI prompt with both renderings) + Type-veto screen (name, type, confidence, 5 samples, override) ⏱2d
-- [ ] P0 Single streaming typed load (`try_cast`) + `_rejects` quarantine + JSON/NDJSON + Parquet lazy mode + `duckdb_memory()` gauge ⏱1.5d
-- [ ] P0 Streaming `fflate` + chunked XML XLSX reader in compute worker (CSP-safe `arrow.makeData`, 1900/1904 UTC dates, merges, hidden sheets/rows, warn > 25 MB, cap 50 MB) ⏱2.5d
+- [x] P0 Format sniffer + compute-worker pre-normalizer (BOM strip, UTF-8/Windows-1252 transcode, mixed `\r\n`/`\r`, ragged row alignment) ⏱2d
+- [x] P0 Sample-5k `all_varchar` SQL scorer (**strict `^[+-]?[0-9]+$` int regex**, leading-zero / ≥11-digit / ID-name vetoes, locale currency/EU decimals) ⏱2.5d
+- [x] P0 Date ambiguity resolver (detect disambiguation; UI prompt with both renderings) + Type-veto screen (name, type, confidence, 5 samples, override) ⏱2d
+- [x] P0 Single streaming typed load (`try_cast`) + `_rejects` quarantine + JSON/NDJSON + Parquet lazy mode + `duckdb_memory()` gauge ⏱1.5d
+- [x] P0 Streaming `fflate` + chunked XML XLSX reader in compute worker (CSP-safe `arrow.makeData`, 1900/1904 UTC dates, merges, hidden sheets/rows, warn > 25 MB, cap 50 MB) ⏱2.5d
 
 ### Profile & Messy Corpus
-- [ ] P0 `SUMMARIZE`-based profile + uPlot sparklines + issue flags (mixed-type, whitespace, casing, constant, key-candidate) with one-click fixes ⏱1d
-- [ ] P0 `packages/fixtures`: 20-file synthetic messy corpus + golden outputs (incl. `1500.50` rounding guard, Win-1252, mixed CRLF, ragged rows) ⏱1d
+- [x] P0 `SUMMARIZE`-based profile + uPlot sparklines + issue flags (mixed-type, whitespace, casing, constant, key-candidate) with one-click fixes ⏱1d
+- [x] P0 `packages/fixtures`: 20-file synthetic messy corpus + golden outputs (incl. `1500.50` rounding guard, Win-1252, mixed CRLF, ragged rows) ⏱1d
 
-**DoD (M1):** All 20 messy corpus files ingest with **zero silent corruption**; 50 MB CSV → profile in **< 3 s**; 500 MB Parquet queries with < 25 MB DuckDB memory.
+**DoD (M1):** All 20 messy corpus files ingest with **zero silent corruption** (`packages/fixtures/src/corpus.test.ts`); 50 MB CSV → `SUMMARIZE` profile in **2.35 s** (Chromium) / **2.96 s** (Firefox) (`< 3 s`); 503.84 MB Snappy Parquet queries via `BROWSER_FILEREADER` with **0.1 MB** DuckDB heap (`< 25 MB`) and 0 external requests (`pnpm run test:m1`).
 
 ---
 

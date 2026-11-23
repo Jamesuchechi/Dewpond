@@ -57,13 +57,21 @@ import {
 } from './WorkbenchIcons';
 
 const FEATURE_TABS: ReadonlyArray<{ id: WorkbenchFeature; label: string }> = [
-  { id: 'ingest', label: 'Unmess / Ingest' },
+  { id: 'data', label: 'Data Grid' },
   { id: 'profile', label: 'Profile' },
   { id: 'clean', label: 'Clean' },
   { id: 'query', label: 'SQL Query' },
   { id: 'redact', label: 'Redact (v1)' },
   { id: 'export', label: 'Export' },
 ];
+
+const VALID_FEATURES = new Set<WorkbenchFeature>(FEATURE_TABS.map((t) => t.id));
+
+function readFeatureFromHash(): WorkbenchFeature {
+  if (typeof window === 'undefined') return 'data';
+  const raw = window.location.hash.replace(/^#\/?/, '').trim().toLowerCase();
+  return VALID_FEATURES.has(raw as WorkbenchFeature) ? (raw as WorkbenchFeature) : 'data';
+}
 
 const LOGICAL_TYPES: readonly LogicalType[] = [
   'VARCHAR',
@@ -213,9 +221,6 @@ export function WorkbenchShell() {
   if (!computeRef.current) {
     computeRef.current = new ComputeClient();
   }
-  if (import.meta.env.DEV && typeof window !== 'undefined') {
-    (window as unknown as { __dewpondClient?: DuckDBClient }).__dewpondClient = clientRef.current;
-  }
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const stagedSourceRef = useRef<{ file?: File; text?: string } | null>(null);
   const pageCacheRef = useRef<Map<string, QueryTableResult>>(new Map());
@@ -251,6 +256,7 @@ export function WorkbenchShell() {
 
   const [statusNote, setStatusNote] = useState('Local DuckDB-WASM 1.32.0 idle until booted.');
   const [dragOver, setDragOver] = useState(false);
+  const [ingestModalOpen, setIngestModalOpen] = useState(false);
   const [stagedReview, setStagedReview] = useState<StagedReview | null>(null);
   const [gridPageNav, setGridPageNav] = useState<TablePageNav | null>(null);
   const [swStatus, setSwStatus] = useState<OfflineSwStatus>({
@@ -262,6 +268,25 @@ export function WorkbenchShell() {
   });
 
   useEffect(() => initOfflineServiceWorker(setSwStatus), []);
+
+  useEffect(() => {
+    const syncFromHash = () => {
+      setActiveFeature(readFeatureFromHash());
+    };
+    syncFromHash();
+    window.addEventListener('hashchange', syncFromHash);
+    return () => window.removeEventListener('hashchange', syncFromHash);
+  }, [setActiveFeature]);
+
+  function navigateFeature(next: WorkbenchFeature): void {
+    setActiveFeature(next);
+    if (typeof window !== 'undefined') {
+      const targetHash = `#/${next}`;
+      if (window.location.hash !== targetHash) {
+        window.history.replaceState(null, '', targetHash);
+      }
+    }
+  }
 
   // Profile state
   const [profileState, setProfileState] = useState<ProfileSummaryState | null>(null);
@@ -480,7 +505,7 @@ export function WorkbenchShell() {
       setStatusNote(
         `Sampled ${sampleRes.rows.length.toLocaleString('en-US')} rows from ${opts.displayName}. Review type vetoes and commit.`,
       );
-      setActiveFeature('ingest');
+      setIngestModalOpen(true);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       setQueryResult(null, msg);
@@ -538,7 +563,7 @@ export function WorkbenchShell() {
       setStatusNote(
         `Parsed XLSX sheet "${parsed.selectedSheet}" (${parsed.rowCount.toLocaleString('en-US')} rows, ${parsed.date1904 ? '1904' : '1900'} UTC epoch).`,
       );
-      setActiveFeature('ingest');
+      setIngestModalOpen(true);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       setQueryResult(null, msg);
@@ -720,6 +745,8 @@ export function WorkbenchShell() {
       applyLoadedSelectionDefaults(loaded);
 
       setStagedReview(null);
+      setIngestModalOpen(false);
+      navigateFeature('data');
       setStatusNote(
         `Loaded "${loaded.baseAlias}" (${rowCount.toLocaleString('en-US')} rows, ${rejectCount} quarantined reject(s)).`,
       );
@@ -810,6 +837,8 @@ export function WorkbenchShell() {
         },
       });
       applyLoadedSelectionDefaults(loaded);
+      setIngestModalOpen(false);
+      navigateFeature('data');
       setStatusNote(
         `Opened ${sourceKind.toUpperCase()} "${targetTable}" (${rowCount.toLocaleString('en-US')} rows${sourceKind === 'parquet' ? ', lazy VIEW' : ''}).`,
       );
@@ -1410,7 +1439,7 @@ export function WorkbenchShell() {
               role="tab"
               aria-selected={activeFeature === tab.id}
               className={activeFeature === tab.id ? 'wb-ribbon-tab active' : 'wb-ribbon-tab'}
-              onClick={() => setActiveFeature(tab.id)}
+              onClick={() => navigateFeature(tab.id)}
             >
               {tab.label}
             </button>
@@ -1521,721 +1550,171 @@ export function WorkbenchShell() {
 
         {/* Center Analytical Canvas */}
         <main className="wb-center">
-          <section className="wb-stage-card" aria-label="Active workbench module">
-            {activeFeature === 'ingest' ? (
-              <div>
-                <div className="wb-stage-header">
-                  <div>
-                    <h1>Unmess &amp; Type-Guarded Ingest</h1>
-                    <p>
-                      Pre-normalizes BOM, Windows-1252, mixed line endings, banners &amp; XLSX in a
-                      compute worker, then applies strict <code>^[+-]?[0-9]+$</code> integer &amp;
-                      ID veto scoring before casting.
-                    </p>
-                  </div>
+          {activeFeature === 'data' && tables.length === 0 ? (
+            <section
+              className="wb-stage-card wb-welcome-card"
+              aria-label="Upload or stage local dataset"
+            >
+              <div className="wb-stage-header">
+                <div>
+                  <h1>Unmess &amp; Type-Guarded Ingest</h1>
+                  <p>
+                    Pre-normalizes BOM, Windows-1252, mixed line endings, banners &amp; XLSX in a
+                    compute worker, then applies strict <code>^[+-]?[0-9]+$</code> integer &amp; ID
+                    veto scoring before casting.
+                  </p>
                 </div>
-
-                {!stagedReview ? (
-                  <div
-                    className={dragOver ? 'wb-dropzone dragover' : 'wb-dropzone'}
-                    onDragOver={(e) => {
-                      e.preventDefault();
-                      setDragOver(true);
-                    }}
-                    onDragLeave={() => setDragOver(false)}
-                    onDrop={handleDrop}
-                  >
-                    <IconUpload className="wb-drop-icon" />
-                    <strong>Drop a CSV, TSV, XLSX (≤ 50 MB), Parquet, JSON, or NDJSON file</strong>
-                    <span>
-                      50 MB+ CSV/Parquet streams lazily via <code>BROWSER_FILEREADER</code> handles;
-                      XLSX parses chunk-by-chunk via <code>fflate</code>.
-                    </span>
-                    <div className="wb-drop-buttons">
-                      <button
-                        type="button"
-                        className="wb-btn wb-btn-primary"
-                        disabled={isBusy}
-                        onClick={() => fileInputRef.current?.click()}
-                      >
-                        Choose File…
-                      </button>
-                      <button
-                        type="button"
-                        className="wb-btn wb-btn-outline"
-                        disabled={isBusy}
-                        onClick={() => void handleLoadMessyDemo()}
-                      >
-                        Stage Messy Fintech Demo (1,200 rows)
-                      </button>
-                    </div>
-                  </div>
-                ) : (
-                  <div className="wb-review-box">
-                    <div className="wb-review-top">
-                      <div>
-                        <strong>
-                          Type Veto Review: <code>{stagedReview.displayName}</code>
-                        </strong>
-                        <span className="wb-review-meta">
-                          Target: <code>{stagedReview.targetTableName}</code> ·{' '}
-                          {formatBytes(stagedReview.bytes)}
-                          {stagedReview.kind === 'xlsx'
-                            ? ` · ${stagedReview.date1904 ? '1904' : '1900'} UTC · ${stagedReview.rowCount} rows`
-                            : stagedReview.normInfo
-                              ? ` · ${stagedReview.normInfo.encoding} · delim "${stagedReview.normInfo.delimiter === '\t' ? '\\t' : stagedReview.normInfo.delimiter}"`
-                              : ' · Streaming direct read_csv'}
-                        </span>
-                      </div>
-                      <div className="wb-review-actions">
-                        <button
-                          type="button"
-                          className="wb-btn wb-btn-outline"
-                          onClick={() => setStagedReview(null)}
-                        >
-                          Discard
-                        </button>
-                        <button
-                          type="button"
-                          className="wb-btn wb-btn-primary"
-                          disabled={isBusy}
-                          onClick={() => void commitStagedReview()}
-                        >
-                          Commit Typed Load into DuckDB
-                        </button>
-                      </div>
-                    </div>
-
-                    {/* Normalization / XLSX Chips & Controls */}
-                    {stagedReview.kind === 'csv' && stagedReview.normInfo ? (
-                      <div className="wb-pill-row">
-                        <span className="wb-tag">{stagedReview.normInfo.encoding}</span>
-                        {stagedReview.normInfo.hadMixedLineEndings ? (
-                          <span className="wb-tag wb-tag-ok">CRLF/CR normalized</span>
-                        ) : null}
-                        {stagedReview.normInfo.skippedBannerRows.length > 0 ? (
-                          <span className="wb-tag wb-tag-warn">
-                            Skipped {stagedReview.normInfo.skippedBannerRows.length} banner row(s)
-                          </span>
-                        ) : null}
-                        {stagedReview.normInfo.paddedShortRows > 0 ||
-                        stagedReview.normInfo.raggedRowAlerts.length > 0 ? (
-                          <span className="wb-tag wb-tag-warn">
-                            Aligned {stagedReview.normInfo.paddedShortRows} short /{' '}
-                            {stagedReview.normInfo.raggedRowAlerts.length} overflow ragged row(s)
-                          </span>
-                        ) : null}
-                        {stagedReview.normInfo.excludedFooterRows.length > 0 ||
-                        !stagedReview.excludeFooter ? (
-                          <button
-                            type="button"
-                            className="wb-pill"
-                            onClick={() =>
-                              void stageCsvTextOrFile({
-                                displayName: stagedReview.displayName,
-                                virtualName: stagedReview.virtualName,
-                                bytes: stagedReview.bytes,
-                                rawBytes: stagedReview.rawBytes,
-                                excludeFooter: !stagedReview.excludeFooter,
-                              })
-                            }
-                          >
-                            {stagedReview.excludeFooter
-                              ? `Excluded ${stagedReview.normInfo.excludedFooterRows.length} totals footer(s) (Restore)`
-                              : 'Restoring totals footer(s) (Exclude)'}
-                          </button>
-                        ) : null}
-                      </div>
-                    ) : null}
-
-                    {stagedReview.kind === 'xlsx' ? (
-                      <div className="wb-pill-row">
-                        <label className="wb-inline-label">
-                          Worksheet:
-                          <select
-                            aria-label="XLSX worksheet selector"
-                            value={stagedReview.selectedSheet}
-                            onChange={(e) => void switchStagedXlsxSheet(e.target.value)}
-                          >
-                            {stagedReview.sheets.map((s) => (
-                              <option key={s.name} value={s.name}>
-                                {s.name}
-                                {s.state !== 'visible' ? ` (${s.state})` : ''}
-                              </option>
-                            ))}
-                          </select>
-                        </label>
-                        {stagedReview.mergedCells.length > 0 ? (
-                          <span className="wb-tag">
-                            {stagedReview.mergedCells.length} merged range(s)
-                          </span>
-                        ) : null}
-                        {stagedReview.hiddenRowCount > 0 ? (
-                          <span className="wb-tag wb-tag-warn">
-                            {stagedReview.hiddenRowCount} hidden row(s)
-                          </span>
-                        ) : null}
-                        {stagedReview.warnings.map((w) => (
-                          <span key={w} className="wb-tag wb-tag-warn">
-                            {w}
-                          </span>
-                        ))}
-                      </div>
-                    ) : null}
-
-                    {stagedReview.hasDateAmbiguity ? (
-                      <div className="wb-date-resolver">
-                        <div className="wb-amber-banner">
-                          <IconAlertTriangle className="wb-ico-sm" />
-                          <div>
-                            <strong>Ambiguous slash dates detected</strong> — choose how dates
-                            parse:
-                          </div>
-                          <select
-                            aria-label="Date interpretation order"
-                            value={stagedReview.dateOrder}
-                            onChange={(e) =>
-                              setStagedReview({
-                                ...stagedReview,
-                                dateOrder: e.target.value as 'DMY' | 'MDY' | 'ISO',
-                              })
-                            }
-                          >
-                            <option value="DMY">Day-First (DD/MM/YYYY)</option>
-                            <option value="MDY">Month-First (MM/DD/YYYY)</option>
-                            <option value="ISO">Keep VARCHAR / ISO</option>
-                          </select>
-                        </div>
-
-                        {ambiguousCols[0]?.ambiguousDatePreviews ? (
-                          <div className="wb-dual-preview">
-                            {ambiguousCols[0].ambiguousDatePreviews.slice(0, 3).map((p) => (
-                              <span key={p.raw} className="wb-tag">
-                                <code>{p.raw}</code> → DMY: <strong>{p.asDmy}</strong> | MDY:{' '}
-                                <strong>{p.asMdy}</strong>
-                              </span>
-                            ))}
-                          </div>
-                        ) : null}
-                      </div>
-                    ) : null}
-
-                    <div className="wb-review-table-wrap">
-                      <table className="wb-mini-table">
-                        <thead>
-                          <tr>
-                            <th>Column</th>
-                            <th>Strict Type</th>
-                            <th>Confidence</th>
-                            <th>Override Type</th>
-                            <th>Veto / Locale Guards</th>
-                            <th>Sample Values (up to 5)</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {stagedReview.inferences.map((inf) => {
-                            const selected = stagedReview.overrides[inf.columnName] ?? inf.type;
-                            return (
-                              <tr key={inf.columnName}>
-                                <td>
-                                  <strong>{inf.columnName}</strong>
-                                </td>
-                                <td>
-                                  <span className="wb-tag">{inf.type}</span>
-                                </td>
-                                <td className="wb-mono">{Math.round(inf.confidence * 100)}%</td>
-                                <td>
-                                  <select
-                                    aria-label={`Type override for ${inf.columnName}`}
-                                    value={selected}
-                                    onChange={(e) =>
-                                      setStagedReview({
-                                        ...stagedReview,
-                                        overrides: {
-                                          ...stagedReview.overrides,
-                                          [inf.columnName]: e.target.value as LogicalType,
-                                        },
-                                      })
-                                    }
-                                  >
-                                    {LOGICAL_TYPES.map((lt) => (
-                                      <option key={lt} value={lt}>
-                                        {lt}
-                                      </option>
-                                    ))}
-                                  </select>
-                                </td>
-                                <td>
-                                  {inf.localeNumberFormat ? (
-                                    <span className="wb-tag wb-tag-ok">
-                                      {inf.localeNumberFormat}
-                                    </span>
-                                  ) : null}
-                                  {inf.vetoReasons.length === 0 && !inf.localeNumberFormat ? (
-                                    <span className="wb-muted">none</span>
-                                  ) : (
-                                    inf.vetoReasons.map((r) => (
-                                      <span key={r} className="wb-tag wb-tag-warn">
-                                        {r}
-                                      </span>
-                                    ))
-                                  )}
-                                </td>
-                                <td className="wb-mono">{inf.sampleValues.join(' | ')}</td>
-                              </tr>
-                            );
-                          })}
-                        </tbody>
-                      </table>
-                    </div>
-                  </div>
-                )}
               </div>
-            ) : null}
 
-            {activeFeature === 'profile' ? (
-              <div>
-                <div className="wb-stage-header">
-                  <div>
-                    <h1>Column Profile (`SUMMARIZE` + uPlot + Issue Flags)</h1>
-                    <p>
-                      Computes summary stats, binned canvas sparklines, and structural hygiene flags
-                      with one-click Recipe fixes.
-                    </p>
-                  </div>
+              <div
+                className={dragOver ? 'wb-dropzone dragover' : 'wb-dropzone'}
+                onDragOver={(e) => {
+                  e.preventDefault();
+                  setDragOver(true);
+                }}
+                onDragLeave={() => setDragOver(false)}
+                onDrop={handleDrop}
+              >
+                <IconUpload className="wb-drop-icon" />
+                <strong>Drop a CSV, TSV, XLSX (≤ 50 MB), Parquet, JSON, or NDJSON file</strong>
+                <span>
+                  50 MB+ CSV/Parquet streams lazily via <code>BROWSER_FILEREADER</code> handles;
+                  XLSX parses chunk-by-chunk via <code>fflate</code>.
+                </span>
+                <div className="wb-drop-buttons">
                   <button
                     type="button"
                     className="wb-btn wb-btn-primary"
-                    disabled={!activeTable || isBusy}
-                    onClick={() => void handleRunProfile()}
+                    disabled={isBusy}
+                    onClick={() => fileInputRef.current?.click()}
                   >
-                    <IconPlay className="wb-ico-xs" /> Run SUMMARIZE Profile
+                    Choose File…
+                  </button>
+                  <button
+                    type="button"
+                    className="wb-btn wb-btn-outline"
+                    disabled={isBusy}
+                    onClick={() => void handleLoadMessyDemo()}
+                  >
+                    Stage Messy Fintech Demo (1,200 rows)
                   </button>
                 </div>
+              </div>
+            </section>
+          ) : null}
 
-                {activeTable ? (
-                  <div className="wb-kpi-strip">
+          {activeFeature !== 'data' ? (
+            <section
+              className={
+                activeFeature === 'profile' ||
+                activeFeature === 'redact' ||
+                activeFeature === 'export'
+                  ? 'wb-stage-card wb-stage-full'
+                  : 'wb-stage-card'
+              }
+              aria-label="Active workbench module"
+            >
+              {activeFeature === 'profile' ? (
+                <div>
+                  <div className="wb-stage-header">
                     <div>
-                      <small>Active Alias</small>
-                      <strong>{activeTable.alias}</strong>
+                      <h1>Column Profile (`SUMMARIZE` + uPlot + Issue Flags)</h1>
+                      <p>
+                        Computes summary stats, binned canvas sparklines, and structural hygiene
+                        flags with one-click Recipe fixes.
+                      </p>
                     </div>
-                    <div>
-                      <small>Total Rows</small>
-                      <strong>{activeTable.rowCount.toLocaleString('en-US')}</strong>
-                    </div>
-                    <div>
-                      <small>Columns</small>
-                      <strong>{activeTable.columns.length}</strong>
-                    </div>
-                    <div>
-                      <small>Quarantined Cast Rejects</small>
-                      <strong>{activeTable.rejectCount}</strong>
-                    </div>
+                    <button
+                      type="button"
+                      className="wb-btn wb-btn-primary"
+                      disabled={!activeTable || isBusy}
+                      onClick={() => void handleRunProfile()}
+                    >
+                      <IconPlay className="wb-ico-xs" /> Run SUMMARIZE Profile
+                    </button>
                   </div>
-                ) : null}
 
-                {profileState && profileState.tableAlias === activeTable?.alias ? (
-                  <div className="wb-profile-stack">
-                    {profileState.issues.length > 0 ? (
-                      <div className="wb-issues-grid">
-                        {profileState.issues.map((issue, idx) => (
-                          <div
-                            key={`${issue.columnName}-${issue.kind}-${idx}`}
-                            className="wb-issue-card"
-                          >
-                            <div>
-                              <span className="wb-tag wb-tag-warn">{issue.kind}</span>
-                              <strong>{issue.columnName}</strong>
-                              <p>{issue.message}</p>
+                  {activeTable ? (
+                    <div className="wb-kpi-strip">
+                      <div>
+                        <small>Active Alias</small>
+                        <strong>{activeTable.alias}</strong>
+                      </div>
+                      <div>
+                        <small>Total Rows</small>
+                        <strong>{activeTable.rowCount.toLocaleString('en-US')}</strong>
+                      </div>
+                      <div>
+                        <small>Columns</small>
+                        <strong>{activeTable.columns.length}</strong>
+                      </div>
+                      <div>
+                        <small>Quarantined Cast Rejects</small>
+                        <strong>{activeTable.rejectCount}</strong>
+                      </div>
+                    </div>
+                  ) : null}
+
+                  {profileState && profileState.tableAlias === activeTable?.alias ? (
+                    <div className="wb-profile-stack">
+                      {profileState.issues.length > 0 ? (
+                        <div className="wb-issues-grid">
+                          {profileState.issues.map((issue, idx) => (
+                            <div
+                              key={`${issue.columnName}-${issue.kind}-${idx}`}
+                              className="wb-issue-card"
+                            >
+                              <div>
+                                <span className="wb-tag wb-tag-warn">{issue.kind}</span>
+                                <strong>{issue.columnName}</strong>
+                                <p>{issue.message}</p>
+                              </div>
+                              {issue.fixLabel ? (
+                                <button
+                                  type="button"
+                                  className="wb-btn-mini"
+                                  disabled={isBusy}
+                                  onClick={() => void handleApplyOneClickIssueFix(issue)}
+                                >
+                                  {issue.fixLabel}
+                                </button>
+                              ) : null}
                             </div>
-                            {issue.fixLabel ? (
-                              <button
-                                type="button"
-                                className="wb-btn-mini"
-                                disabled={isBusy}
-                                onClick={() => void handleApplyOneClickIssueFix(issue)}
-                              >
-                                {issue.fixLabel}
-                              </button>
-                            ) : null}
-                          </div>
-                        ))}
-                      </div>
-                    ) : null}
-
-                    <div className="wb-review-table-wrap">
-                      <table className="wb-mini-table">
-                        <thead>
-                          <tr>
-                            <th>column_name</th>
-                            <th>sparkline</th>
-                            <th>column_type</th>
-                            <th>min</th>
-                            <th>max</th>
-                            <th>approx_unique</th>
-                            <th>null_percentage</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {profileState.summarize.rows.map((row, idx) => {
-                            const colName = row[0] ?? '';
-                            const sparkVals = profileState.sparklines[colName] ?? [0, 1];
-                            return (
-                              <tr key={idx}>
-                                <td>
-                                  <strong>{colName}</strong>
-                                </td>
-                                <td>
-                                  <ProfileSparkline values={sparkVals} label={colName} />
-                                </td>
-                                <td className="wb-mono">{row[1] ?? ''}</td>
-                                <td className="wb-mono">{row[2] ?? ''}</td>
-                                <td className="wb-mono">{row[3] ?? ''}</td>
-                                <td className="wb-mono">{row[4] ?? ''}</td>
-                                <td className="wb-mono">
-                                  {row[9] ?? row[profileState.summarize.columns.length - 1] ?? ''}
-                                </td>
-                              </tr>
-                            );
-                          })}
-                        </tbody>
-                      </table>
-                    </div>
-                  </div>
-                ) : (
-                  <p className="wb-empty-note">
-                    {activeTable
-                      ? 'Click "Run SUMMARIZE Profile" to inspect column sparklines and issue flags.'
-                      : 'Load or stage a table first to profile columns.'}
-                  </p>
-                )}
-              </div>
-            ) : null}
-
-            {activeFeature === 'clean' ? (
-              <div>
-                <div className="wb-stage-header">
-                  <div>
-                    <h1>Click-to-SQL Clean</h1>
-                    <p>
-                      Every clean step compiles to deterministic DuckDB SQL with{' '}
-                      <code>&quot;__rid&quot; ASC</code> tiebreakers and non-destructive{' '}
-                      <code>head</code> undo.
-                    </p>
-                  </div>
-                </div>
-
-                {!activeTable ? (
-                  <p className="wb-empty-note">Load a table first to build cleaning steps.</p>
-                ) : (
-                  <div className="wb-clean-builder">
-                    <div className="wb-pill-row">
-                      {(
-                        [
-                          ['dedupe', 'Exact Dedupe'],
-                          ['trim', 'Trim All Text Columns'],
-                          ['filter', 'Filter Rows'],
-                          ['rename', 'Rename Column'],
-                          ['drop', 'Drop Column'],
-                        ] as const
-                      ).map(([op, label]) => (
-                        <button
-                          key={op}
-                          type="button"
-                          className={cleanOp === op ? 'wb-pill active' : 'wb-pill'}
-                          onClick={() => setCleanOp(op)}
-                        >
-                          {label}
-                        </button>
-                      ))}
-                    </div>
-
-                    <div className="wb-form-row">
-                      {cleanOp !== 'trim' ? (
-                        <label>
-                          Target / Key Column
-                          <select
-                            value={cleanPrimaryCol}
-                            onChange={(e) => setCleanPrimaryCol(e.target.value)}
-                          >
-                            {userColumns.map((c) => (
-                              <option key={c.name} value={c.name}>
-                                {c.name}
-                              </option>
-                            ))}
-                          </select>
-                        </label>
+                          ))}
+                        </div>
                       ) : null}
-
-                      {cleanOp === 'dedupe' ? (
-                        <>
-                          <label>
-                            Keep Row
-                            <select
-                              value={cleanDedupeKeep}
-                              onChange={(e) =>
-                                setCleanDedupeKeep(e.target.value as 'first' | 'last')
-                              }
-                            >
-                              <option value="last">Newest / Last</option>
-                              <option value="first">Oldest / First</option>
-                            </select>
-                          </label>
-                          <label>
-                            Order By
-                            <select
-                              value={cleanOrderCol}
-                              onChange={(e) => setCleanOrderCol(e.target.value)}
-                            >
-                              <option value="">__rid only</option>
-                              {userColumns.map((c) => (
-                                <option key={c.name} value={c.name}>
-                                  {c.name}
-                                </option>
-                              ))}
-                            </select>
-                          </label>
-                        </>
-                      ) : null}
-
-                      {cleanOp === 'filter' ? (
-                        <>
-                          <label>
-                            Operator
-                            <select
-                              value={cleanFilterOp}
-                              onChange={(e) =>
-                                setCleanFilterOp(
-                                  e.target.value as 'not_null' | 'eq' | 'contains' | 'gt',
-                                )
-                              }
-                            >
-                              <option value="not_null">IS NOT NULL</option>
-                              <option value="eq">Equals</option>
-                              <option value="contains">Contains (case-insensitive)</option>
-                              <option value="gt">Greater than (&gt;)</option>
-                            </select>
-                          </label>
-                          {cleanFilterOp !== 'not_null' ? (
-                            <label>
-                              Value
-                              <input
-                                type="text"
-                                value={cleanFilterVal}
-                                placeholder="e.g. Treasury or 1000"
-                                onChange={(e) => setCleanFilterVal(e.target.value)}
-                              />
-                            </label>
-                          ) : null}
-                        </>
-                      ) : null}
-
-                      {cleanOp === 'rename' ? (
-                        <label>
-                          New Column Name
-                          <input
-                            type="text"
-                            value={cleanRenameTo}
-                            onChange={(e) => setCleanRenameTo(e.target.value)}
-                          />
-                        </label>
-                      ) : null}
-
-                      <button
-                        type="button"
-                        className="wb-btn wb-btn-primary"
-                        disabled={isBusy}
-                        onClick={() => void handleApplyCleanStep()}
-                      >
-                        Apply Clean Step
-                      </button>
-                    </div>
-                  </div>
-                )}
-              </div>
-            ) : null}
-
-            {activeFeature === 'query' ? (
-              <div>
-                <div className="wb-stage-header">
-                  <div>
-                    <h1>SQL Query Workbench</h1>
-                    <p>
-                      Press <code>Ctrl+Enter</code> / <code>Cmd+Enter</code> to execute local DuckDB
-                      SQL. Validated by <code>@dewpond/sqlkit</code>.
-                    </p>
-                  </div>
-                  <div className="wb-query-actions">
-                    <span className={sqlSafety.ok ? 'wb-tag wb-tag-ok' : 'wb-tag wb-tag-warn'}>
-                      {sqlSafety.ok ? 'Read-Only Safe SQL' : `Guarded: ${sqlSafety.reasons[0]}`}
-                    </span>
-                    <button
-                      type="button"
-                      className="wb-btn wb-btn-primary"
-                      disabled={isBusy}
-                      onClick={() => void handleRunSql()}
-                    >
-                      <IconPlay className="wb-ico-xs" /> Run Query
-                    </button>
-                  </div>
-                </div>
-
-                {activeTable ? (
-                  <div className="wb-pill-row">
-                    <button
-                      type="button"
-                      className="wb-pill"
-                      onClick={() =>
-                        setSqlDraft(`SELECT * FROM ${ident(activeTable.alias)} LIMIT 200;`)
-                      }
-                    >
-                      Preview 200
-                    </button>
-                    <button
-                      type="button"
-                      className="wb-pill"
-                      onClick={() =>
-                        setSqlDraft(
-                          `SELECT\n  "department",\n  count(*) AS tx_count,\n  round(sum("amount"), 2) AS total_amount\nFROM ${ident(activeTable.alias)}\nGROUP BY "department"\nORDER BY total_amount DESC;`,
-                        )
-                      }
-                    >
-                      Department Totals
-                    </button>
-                    <button
-                      type="button"
-                      className="wb-pill"
-                      onClick={() => setSqlDraft(`SUMMARIZE ${ident(activeTable.alias)};`)}
-                    >
-                      SUMMARIZE
-                    </button>
-                    <label className="wb-check-inline">
-                      <input
-                        type="checkbox"
-                        checked={allowTrustedDdl}
-                        onChange={(e) => setAllowTrustedDdl(e.target.checked)}
-                      />
-                      Allow local non-URI DDL (e.g. SUMMARIZE / CREATE TEMP)
-                    </label>
-                  </div>
-                ) : null}
-
-                <SqlEditor
-                  value={sqlDraft}
-                  schema={sqlSchema}
-                  onChange={setSqlDraft}
-                  onRun={() => void handleRunSql()}
-                />
-              </div>
-            ) : null}
-
-            {activeFeature === 'redact' ? (
-              <div>
-                <div className="wb-stage-header">
-                  <div>
-                    <h1>Redact PII (v1 Headline Workflow)</h1>
-                    <p>
-                      Scans samples locally with <code>@dewpond/pii</code>, applies deterministic
-                      salted <code>sha256</code> / masking / generalization / hash-shuffle, and
-                      checks residual k-anonymity cohorts.
-                    </p>
-                  </div>
-                  <div className="wb-review-actions">
-                    <button
-                      type="button"
-                      className="wb-btn wb-btn-outline"
-                      disabled={!activeTable || isBusy}
-                      onClick={() => void handleScanPii()}
-                    >
-                      <IconShieldCheck className="wb-ico-sm" /> Scan PII Columns
-                    </button>
-                    <button
-                      type="button"
-                      className="wb-btn wb-btn-primary"
-                      disabled={!activeTable || isBusy}
-                      onClick={() => void handleApplyRedaction()}
-                    >
-                      Apply Redaction
-                    </button>
-                  </div>
-                </div>
-
-                {!activeTable ? (
-                  <p className="wb-empty-note">Load a table first to scan and redact PII.</p>
-                ) : (
-                  <div className="wb-redact-grid">
-                    <div className="wb-redact-left">
-                      <div className="wb-form-row">
-                        <label>
-                          Session Salt (`sha256`)
-                          <input
-                            type="text"
-                            value={redactSalt}
-                            onChange={(e) => setRedactSalt(e.target.value)}
-                          />
-                        </label>
-                        <label>
-                          Shuffle Seed
-                          <input
-                            type="text"
-                            value={shuffleSeed}
-                            onChange={(e) => setShuffleSeed(e.target.value)}
-                          />
-                        </label>
-                      </div>
 
                       <div className="wb-review-table-wrap">
                         <table className="wb-mini-table">
                           <thead>
                             <tr>
-                              <th>Column</th>
-                              <th>Detected PII</th>
-                              <th>Action</th>
+                              <th>column_name</th>
+                              <th>sparkline</th>
+                              <th>column_type</th>
+                              <th>min</th>
+                              <th>max</th>
+                              <th>approx_unique</th>
+                              <th>null_percentage</th>
                             </tr>
                           </thead>
                           <tbody>
-                            {userColumns.map((col) => {
-                              const colFindings = piiFindings.filter(
-                                (f) => f.columnName === col.name,
-                              );
-                              const mode = redactPlans[col.name] ?? 'keep';
+                            {profileState.summarize.rows.map((row, idx) => {
+                              const colName = row[0] ?? '';
+                              const sparkVals = profileState.sparklines[colName] ?? [0, 1];
                               return (
-                                <tr key={col.name}>
+                                <tr key={idx}>
                                   <td>
-                                    <strong>{col.name}</strong>
+                                    <strong>{colName}</strong>
                                   </td>
                                   <td>
-                                    {colFindings.length === 0 ? (
-                                      <span className="wb-muted">none scanned</span>
-                                    ) : (
-                                      colFindings.map((f) => (
-                                        <span key={f.detector} className="wb-tag wb-tag-warn">
-                                          {f.detector} ({Math.round(f.matchRate * 100)}% ·{' '}
-                                          {f.confidence})
-                                        </span>
-                                      ))
-                                    )}
+                                    <ProfileSparkline values={sparkVals} label={colName} />
                                   </td>
-                                  <td>
-                                    <select
-                                      aria-label={`Redaction mode for ${col.name}`}
-                                      value={mode}
-                                      onChange={(e) =>
-                                        setRedactPlans({
-                                          ...redactPlans,
-                                          [col.name]: e.target.value as RedactColumnPlan['mode'],
-                                        })
-                                      }
-                                    >
-                                      <option value="keep">Keep as-is</option>
-                                      <option value="mask">Mask (keep ends)</option>
-                                      <option value="hash_sha256">Salted sha256 Hash</option>
-                                      <option value="generalize">
-                                        Generalize (Month / 1k Band)
-                                      </option>
-                                      <option value="shuffle">Deterministic Hash-Shuffle</option>
-                                      <option value="drop">Drop Column</option>
-                                    </select>
+                                  <td className="wb-mono">{row[1] ?? ''}</td>
+                                  <td className="wb-mono">{row[2] ?? ''}</td>
+                                  <td className="wb-mono">{row[3] ?? ''}</td>
+                                  <td className="wb-mono">{row[4] ?? ''}</td>
+                                  <td className="wb-mono">
+                                    {row[9] ?? row[profileState.summarize.columns.length - 1] ?? ''}
                                   </td>
                                 </tr>
                               );
@@ -2244,172 +1723,519 @@ export function WorkbenchShell() {
                         </table>
                       </div>
                     </div>
+                  ) : (
+                    <p className="wb-empty-note">
+                      {activeTable
+                        ? 'Click "Run SUMMARIZE Profile" to inspect column sparklines and issue flags.'
+                        : 'Load or stage a table first to profile columns.'}
+                    </p>
+                  )}
+                </div>
+              ) : null}
 
-                    <aside className="wb-kanon-card">
-                      <strong>k-Anonymity Residual Risk Check</strong>
+              {activeFeature === 'clean' ? (
+                <div>
+                  <div className="wb-stage-header">
+                    <div>
+                      <h1>Click-to-SQL Clean</h1>
                       <p>
-                        Checks <code>GROUP BY</code> cohort sizes over selected quasi-identifiers.
+                        Every clean step compiles to deterministic DuckDB SQL with{' '}
+                        <code>&quot;__rid&quot; ASC</code> tiebreakers and non-destructive{' '}
+                        <code>head</code> undo.
                       </p>
-                      <div className="wb-qi-list">
-                        {userColumns.map((col) => {
-                          const checked = qiColumns.includes(col.name);
-                          return (
-                            <label key={col.name} className="wb-check-inline">
-                              <input
-                                type="checkbox"
-                                checked={checked}
-                                onChange={(e) =>
-                                  setQiColumns(
-                                    e.target.checked
-                                      ? [...qiColumns, col.name]
-                                      : qiColumns.filter((x) => x !== col.name),
-                                  )
-                                }
-                              />
-                              {col.name}
-                            </label>
-                          );
-                        })}
+                    </div>
+                  </div>
+
+                  {!activeTable ? (
+                    <p className="wb-empty-note">Load a table first to build cleaning steps.</p>
+                  ) : (
+                    <div className="wb-clean-builder">
+                      <div className="wb-pill-row">
+                        {(
+                          [
+                            ['dedupe', 'Exact Dedupe'],
+                            ['trim', 'Trim All Text Columns'],
+                            ['filter', 'Filter Rows'],
+                            ['rename', 'Rename Column'],
+                            ['drop', 'Drop Column'],
+                          ] as const
+                        ).map(([op, label]) => (
+                          <button
+                            key={op}
+                            type="button"
+                            className={cleanOp === op ? 'wb-pill active' : 'wb-pill'}
+                            onClick={() => setCleanOp(op)}
+                          >
+                            {label}
+                          </button>
+                        ))}
                       </div>
 
                       <div className="wb-form-row">
-                        <label>
-                          Min Cohort (k)
-                          <input
-                            type="number"
-                            min={2}
-                            max={100}
-                            value={kThreshold}
-                            onChange={(e) => setKThreshold(Number(e.target.value) || 5)}
-                          />
-                        </label>
+                        {cleanOp !== 'trim' ? (
+                          <label>
+                            Target / Key Column
+                            <select
+                              value={cleanPrimaryCol}
+                              onChange={(e) => setCleanPrimaryCol(e.target.value)}
+                            >
+                              {userColumns.map((c) => (
+                                <option key={c.name} value={c.name}>
+                                  {c.name}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                        ) : null}
+
+                        {cleanOp === 'dedupe' ? (
+                          <>
+                            <label>
+                              Keep Row
+                              <select
+                                value={cleanDedupeKeep}
+                                onChange={(e) =>
+                                  setCleanDedupeKeep(e.target.value as 'first' | 'last')
+                                }
+                              >
+                                <option value="last">Newest / Last</option>
+                                <option value="first">Oldest / First</option>
+                              </select>
+                            </label>
+                            <label>
+                              Order By
+                              <select
+                                value={cleanOrderCol}
+                                onChange={(e) => setCleanOrderCol(e.target.value)}
+                              >
+                                <option value="">__rid only</option>
+                                {userColumns.map((c) => (
+                                  <option key={c.name} value={c.name}>
+                                    {c.name}
+                                  </option>
+                                ))}
+                              </select>
+                            </label>
+                          </>
+                        ) : null}
+
+                        {cleanOp === 'filter' ? (
+                          <>
+                            <label>
+                              Operator
+                              <select
+                                value={cleanFilterOp}
+                                onChange={(e) =>
+                                  setCleanFilterOp(
+                                    e.target.value as 'not_null' | 'eq' | 'contains' | 'gt',
+                                  )
+                                }
+                              >
+                                <option value="not_null">IS NOT NULL</option>
+                                <option value="eq">Equals</option>
+                                <option value="contains">Contains (case-insensitive)</option>
+                                <option value="gt">Greater than (&gt;)</option>
+                              </select>
+                            </label>
+                            {cleanFilterOp !== 'not_null' ? (
+                              <label>
+                                Value
+                                <input
+                                  type="text"
+                                  value={cleanFilterVal}
+                                  placeholder="e.g. Treasury or 1000"
+                                  onChange={(e) => setCleanFilterVal(e.target.value)}
+                                />
+                              </label>
+                            ) : null}
+                          </>
+                        ) : null}
+
+                        {cleanOp === 'rename' ? (
+                          <label>
+                            New Column Name
+                            <input
+                              type="text"
+                              value={cleanRenameTo}
+                              onChange={(e) => setCleanRenameTo(e.target.value)}
+                            />
+                          </label>
+                        ) : null}
+
+                        <button
+                          type="button"
+                          className="wb-btn wb-btn-primary"
+                          disabled={isBusy}
+                          onClick={() => void handleApplyCleanStep()}
+                        >
+                          Apply Clean Step
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ) : null}
+
+              {activeFeature === 'query' ? (
+                <div>
+                  <div className="wb-stage-header">
+                    <div>
+                      <h1>SQL Query Workbench</h1>
+                      <p>
+                        Press <code>Ctrl+Enter</code> / <code>Cmd+Enter</code> to execute local
+                        DuckDB SQL. Validated by <code>@dewpond/sqlkit</code>.
+                      </p>
+                    </div>
+                    <div className="wb-query-actions">
+                      <span className={sqlSafety.ok ? 'wb-tag wb-tag-ok' : 'wb-tag wb-tag-warn'}>
+                        {sqlSafety.ok ? 'Read-Only Safe SQL' : `Guarded: ${sqlSafety.reasons[0]}`}
+                      </span>
+                      <button
+                        type="button"
+                        className="wb-btn wb-btn-primary"
+                        disabled={isBusy}
+                        onClick={() => void handleRunSql()}
+                      >
+                        <IconPlay className="wb-ico-xs" /> Run Query
+                      </button>
+                    </div>
+                  </div>
+
+                  {activeTable ? (
+                    <div className="wb-pill-row">
+                      <button
+                        type="button"
+                        className="wb-pill"
+                        onClick={() =>
+                          setSqlDraft(`SELECT * FROM ${ident(activeTable.alias)} LIMIT 200;`)
+                        }
+                      >
+                        Preview 200
+                      </button>
+                      <button
+                        type="button"
+                        className="wb-pill"
+                        onClick={() =>
+                          setSqlDraft(
+                            `SELECT\n  "department",\n  count(*) AS tx_count,\n  round(sum("amount"), 2) AS total_amount\nFROM ${ident(activeTable.alias)}\nGROUP BY "department"\nORDER BY total_amount DESC;`,
+                          )
+                        }
+                      >
+                        Department Totals
+                      </button>
+                      <button
+                        type="button"
+                        className="wb-pill"
+                        onClick={() => setSqlDraft(`SUMMARIZE ${ident(activeTable.alias)};`)}
+                      >
+                        SUMMARIZE
+                      </button>
+                      <label className="wb-check-inline">
+                        <input
+                          type="checkbox"
+                          checked={allowTrustedDdl}
+                          onChange={(e) => setAllowTrustedDdl(e.target.checked)}
+                        />
+                        Allow local non-URI DDL (e.g. SUMMARIZE / CREATE TEMP)
+                      </label>
+                    </div>
+                  ) : null}
+
+                  <SqlEditor
+                    value={sqlDraft}
+                    schema={sqlSchema}
+                    onChange={setSqlDraft}
+                    onRun={() => void handleRunSql()}
+                  />
+                </div>
+              ) : null}
+
+              {activeFeature === 'redact' ? (
+                <div>
+                  <div className="wb-stage-header">
+                    <div>
+                      <h1>Redact PII (v1 Headline Workflow)</h1>
+                      <p>
+                        Scans samples locally with <code>@dewpond/pii</code>, applies deterministic
+                        salted <code>sha256</code> / masking / generalization / hash-shuffle, and
+                        checks residual k-anonymity cohorts.
+                      </p>
+                    </div>
+                    <div className="wb-review-actions">
+                      <button
+                        type="button"
+                        className="wb-btn wb-btn-outline"
+                        disabled={!activeTable || isBusy}
+                        onClick={() => void handleScanPii()}
+                      >
+                        <IconShieldCheck className="wb-ico-sm" /> Scan PII Columns
+                      </button>
+                      <button
+                        type="button"
+                        className="wb-btn wb-btn-primary"
+                        disabled={!activeTable || isBusy}
+                        onClick={() => void handleApplyRedaction()}
+                      >
+                        Apply Redaction
+                      </button>
+                    </div>
+                  </div>
+
+                  {!activeTable ? (
+                    <p className="wb-empty-note">Load a table first to scan and redact PII.</p>
+                  ) : (
+                    <div className="wb-redact-grid">
+                      <div className="wb-redact-left">
+                        <div className="wb-form-row">
+                          <label>
+                            Session Salt (`sha256`)
+                            <input
+                              type="text"
+                              value={redactSalt}
+                              onChange={(e) => setRedactSalt(e.target.value)}
+                            />
+                          </label>
+                          <label>
+                            Shuffle Seed
+                            <input
+                              type="text"
+                              value={shuffleSeed}
+                              onChange={(e) => setShuffleSeed(e.target.value)}
+                            />
+                          </label>
+                        </div>
+
+                        <div className="wb-review-table-wrap">
+                          <table className="wb-mini-table">
+                            <thead>
+                              <tr>
+                                <th>Column</th>
+                                <th>Detected PII</th>
+                                <th>Action</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {userColumns.map((col) => {
+                                const colFindings = piiFindings.filter(
+                                  (f) => f.columnName === col.name,
+                                );
+                                const mode = redactPlans[col.name] ?? 'keep';
+                                return (
+                                  <tr key={col.name}>
+                                    <td>
+                                      <strong>{col.name}</strong>
+                                    </td>
+                                    <td>
+                                      {colFindings.length === 0 ? (
+                                        <span className="wb-muted">none scanned</span>
+                                      ) : (
+                                        colFindings.map((f) => (
+                                          <span key={f.detector} className="wb-tag wb-tag-warn">
+                                            {f.detector} ({Math.round(f.matchRate * 100)}% ·{' '}
+                                            {f.confidence})
+                                          </span>
+                                        ))
+                                      )}
+                                    </td>
+                                    <td>
+                                      <select
+                                        aria-label={`Redaction mode for ${col.name}`}
+                                        value={mode}
+                                        onChange={(e) =>
+                                          setRedactPlans({
+                                            ...redactPlans,
+                                            [col.name]: e.target.value as RedactColumnPlan['mode'],
+                                          })
+                                        }
+                                      >
+                                        <option value="keep">Keep as-is</option>
+                                        <option value="mask">Mask (keep ends)</option>
+                                        <option value="hash_sha256">Salted sha256 Hash</option>
+                                        <option value="generalize">
+                                          Generalize (Month / 1k Band)
+                                        </option>
+                                        <option value="shuffle">Deterministic Hash-Shuffle</option>
+                                        <option value="drop">Drop Column</option>
+                                      </select>
+                                    </td>
+                                  </tr>
+                                );
+                              })}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+
+                      <aside className="wb-kanon-card">
+                        <strong>k-Anonymity Residual Risk Check</strong>
+                        <p>
+                          Checks <code>GROUP BY</code> cohort sizes over selected quasi-identifiers.
+                        </p>
+                        <div className="wb-qi-list">
+                          {userColumns.map((col) => {
+                            const checked = qiColumns.includes(col.name);
+                            return (
+                              <label key={col.name} className="wb-check-inline">
+                                <input
+                                  type="checkbox"
+                                  checked={checked}
+                                  onChange={(e) =>
+                                    setQiColumns(
+                                      e.target.checked
+                                        ? [...qiColumns, col.name]
+                                        : qiColumns.filter((x) => x !== col.name),
+                                    )
+                                  }
+                                />
+                                {col.name}
+                              </label>
+                            );
+                          })}
+                        </div>
+
+                        <div className="wb-form-row">
+                          <label>
+                            Min Cohort (k)
+                            <input
+                              type="number"
+                              min={2}
+                              max={100}
+                              value={kThreshold}
+                              onChange={(e) => setKThreshold(Number(e.target.value) || 5)}
+                            />
+                          </label>
+                          <button
+                            type="button"
+                            className="wb-btn wb-btn-outline"
+                            disabled={qiColumns.length === 0 || isBusy}
+                            onClick={() => void handleCheckKAnonymity()}
+                          >
+                            Check Risk
+                          </button>
+                        </div>
+
+                        {kAnonResult ? (
+                          <div className="wb-kanon-status">
+                            <span
+                              className={
+                                kAnonResult.rows.length === 0
+                                  ? 'wb-tag wb-tag-ok'
+                                  : 'wb-tag wb-tag-warn'
+                              }
+                            >
+                              {kAnonResult.rows.length === 0
+                                ? `Pass: zero cohorts < ${kThreshold}`
+                                : `${kAnonResult.rows.length} small cohort(s) < ${kThreshold}`}
+                            </span>
+                          </div>
+                        ) : null}
+
+                        <button
+                          type="button"
+                          className="wb-btn wb-btn-outline wb-btn-block"
+                          onClick={handleDownloadRedactReport}
+                        >
+                          <IconDownload className="wb-ico-xs" /> Download Raw-Value-Free Report
+                          (.json)
+                        </button>
+                      </aside>
+                    </div>
+                  )}
+                </div>
+              ) : null}
+
+              {activeFeature === 'export' ? (
+                <div>
+                  <div className="wb-stage-header">
+                    <div>
+                      <h1>Local Export &amp; Share-Safe Recipes</h1>
+                      <p>
+                        Downloads generate local Blob URLs directly from browser memory—zero server
+                        endpoints involved.
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="wb-export-grid">
+                    <div className="wb-export-card">
+                      <strong>Cleaned Data Files</strong>
+                      <p>
+                        Active target: <code>{activeTable?.alias ?? 'none loaded'}</code>
+                      </p>
+                      <div className="wb-drop-buttons">
+                        <button
+                          type="button"
+                          className="wb-btn wb-btn-primary"
+                          disabled={!activeTable || isBusy}
+                          onClick={() => void handleExportData('csv')}
+                        >
+                          <IconDownload className="wb-ico-xs" /> Export CSV
+                        </button>
                         <button
                           type="button"
                           className="wb-btn wb-btn-outline"
-                          disabled={qiColumns.length === 0 || isBusy}
-                          onClick={() => void handleCheckKAnonymity()}
+                          disabled={!activeTable || isBusy}
+                          onClick={() => void handleExportData('json')}
                         >
-                          Check Risk
+                          <IconDownload className="wb-ico-xs" /> Export JSON
                         </button>
                       </div>
-
-                      {kAnonResult ? (
-                        <div className="wb-kanon-status">
-                          <span
-                            className={
-                              kAnonResult.rows.length === 0
-                                ? 'wb-tag wb-tag-ok'
-                                : 'wb-tag wb-tag-warn'
-                            }
-                          >
-                            {kAnonResult.rows.length === 0
-                              ? `Pass: zero cohorts < ${kThreshold}`
-                              : `${kAnonResult.rows.length} small cohort(s) < ${kThreshold}`}
-                          </span>
-                        </div>
-                      ) : null}
-
-                      <button
-                        type="button"
-                        className="wb-btn wb-btn-outline wb-btn-block"
-                        onClick={handleDownloadRedactReport}
-                      >
-                        <IconDownload className="wb-ico-xs" /> Download Raw-Value-Free Report
-                        (.json)
-                      </button>
-                    </aside>
-                  </div>
-                )}
-              </div>
-            ) : null}
-
-            {activeFeature === 'export' ? (
-              <div>
-                <div className="wb-stage-header">
-                  <div>
-                    <h1>Local Export &amp; Share-Safe Recipes</h1>
-                    <p>
-                      Downloads generate local Blob URLs directly from browser memory—zero server
-                      endpoints involved.
-                    </p>
-                  </div>
-                </div>
-
-                <div className="wb-export-grid">
-                  <div className="wb-export-card">
-                    <strong>Cleaned Data Files</strong>
-                    <p>
-                      Active target: <code>{activeTable?.alias ?? 'none loaded'}</code>
-                    </p>
-                    <div className="wb-drop-buttons">
-                      <button
-                        type="button"
-                        className="wb-btn wb-btn-primary"
-                        disabled={!activeTable || isBusy}
-                        onClick={() => void handleExportData('csv')}
-                      >
-                        <IconDownload className="wb-ico-xs" /> Export CSV
-                      </button>
-                      <button
-                        type="button"
-                        className="wb-btn wb-btn-outline"
-                        disabled={!activeTable || isBusy}
-                        onClick={() => void handleExportData('json')}
-                      >
-                        <IconDownload className="wb-ico-xs" /> Export JSON
-                      </button>
+                      <small className="wb-muted">
+                        Parquet (`parquet-wasm`) and streaming XLSX (`fflate`) writers ship in M3.
+                      </small>
                     </div>
-                    <small className="wb-muted">
-                      Parquet (`parquet-wasm`) and streaming XLSX (`fflate`) writers ship in M3.
-                    </small>
-                  </div>
 
-                  <div className="wb-export-card">
-                    <strong>Reproducible Pipeline</strong>
-                    <p>
-                      Share-safe check: {shareFindings.length} literal/salt warning(s) detected in{' '}
-                      <code>recipe.steps</code>.
-                    </p>
-                    <div className="wb-drop-buttons">
-                      <button
-                        type="button"
-                        className="wb-btn wb-btn-primary"
-                        onClick={() =>
-                          triggerBlobDownload(
-                            `${recipe.name.toLowerCase().replace(/[^a-z0-9]+/g, '_')}.dew.json`,
-                            JSON.stringify(recipe, null, 2),
-                            'application/json',
-                          )
-                        }
-                      >
-                        <IconDownload className="wb-ico-xs" /> Export .dew.json
-                      </button>
-                      <button
-                        type="button"
-                        className="wb-btn wb-btn-outline"
-                        onClick={() =>
-                          triggerBlobDownload(
-                            'dewpond_pipeline.sql',
-                            compileFullRecipeSql(stepSnapshots.slice(0, recipe.head)),
-                            'text/plain;charset=utf-8',
-                          )
-                        }
-                      >
-                        <IconDownload className="wb-ico-xs" /> Export .sql Script
-                      </button>
+                    <div className="wb-export-card">
+                      <strong>Reproducible Pipeline</strong>
+                      <p>
+                        Share-safe check: {shareFindings.length} literal/salt warning(s) detected in{' '}
+                        <code>recipe.steps</code>.
+                      </p>
+                      <div className="wb-drop-buttons">
+                        <button
+                          type="button"
+                          className="wb-btn wb-btn-primary"
+                          onClick={() =>
+                            triggerBlobDownload(
+                              `${recipe.name.toLowerCase().replace(/[^a-z0-9]+/g, '_')}.dew.json`,
+                              JSON.stringify(recipe, null, 2),
+                              'application/json',
+                            )
+                          }
+                        >
+                          <IconDownload className="wb-ico-xs" /> Export .dew.json
+                        </button>
+                        <button
+                          type="button"
+                          className="wb-btn wb-btn-outline"
+                          onClick={() =>
+                            triggerBlobDownload(
+                              'dewpond_pipeline.sql',
+                              compileFullRecipeSql(stepSnapshots.slice(0, recipe.head)),
+                              'text/plain;charset=utf-8',
+                            )
+                          }
+                        >
+                          <IconDownload className="wb-ico-xs" /> Export .sql Script
+                        </button>
+                      </div>
                     </div>
                   </div>
                 </div>
-              </div>
-            ) : null}
-          </section>
+              ) : null}
+            </section>
+          ) : null}
 
-          <DataGrid
-            title={activeTable ? `Grid · ${activeTable.alias}` : 'Data Grid'}
-            result={queryResult}
-            error={queryError ?? engineError}
-            pageNav={gridPageNav}
-          />
+          {(activeFeature === 'data' && tables.length > 0) ||
+          activeFeature === 'clean' ||
+          activeFeature === 'query' ? (
+            <DataGrid
+              title={activeTable ? `Grid · ${activeTable.alias}` : 'Data Grid'}
+              result={queryResult}
+              error={queryError ?? engineError}
+              pageNav={gridPageNav}
+            />
+          ) : null}
         </main>
 
         {/* Right Recipe & Audit Drawer */}
@@ -2498,6 +2324,296 @@ export function WorkbenchShell() {
           </div>
         </aside>
       </div>
+
+      {/* On-demand Unmess & Type-Veto Modal */}
+      {ingestModalOpen || stagedReview ? (
+        <div
+          className="wb-modal-backdrop"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Unmess & Type-Guarded Ingest"
+        >
+          <div className="wb-modal-dialog">
+            <div className="wb-modal-head">
+              <div>
+                <h2>Unmess &amp; Type-Guarded Ingest</h2>
+                <p>
+                  Pre-normalizes BOM, Windows-1252, mixed line endings, banners &amp; XLSX in a
+                  compute worker, then applies strict <code>^[+-]?[0-9]+$</code> integer &amp; ID
+                  veto scoring before casting.
+                </p>
+              </div>
+              <button
+                type="button"
+                className="wb-btn wb-btn-outline"
+                disabled={isBusy}
+                onClick={() => {
+                  setStagedReview(null);
+                  setIngestModalOpen(false);
+                }}
+              >
+                Close
+              </button>
+            </div>
+
+            {!stagedReview ? (
+              <div
+                className={dragOver ? 'wb-dropzone dragover' : 'wb-dropzone'}
+                onDragOver={(e) => {
+                  e.preventDefault();
+                  setDragOver(true);
+                }}
+                onDragLeave={() => setDragOver(false)}
+                onDrop={handleDrop}
+              >
+                <IconUpload className="wb-drop-icon" />
+                <strong>Drop a CSV, TSV, XLSX (≤ 50 MB), Parquet, JSON, or NDJSON file</strong>
+                <span>
+                  50 MB+ CSV/Parquet streams lazily via <code>BROWSER_FILEREADER</code> handles;
+                  XLSX parses chunk-by-chunk via <code>fflate</code>.
+                </span>
+                <div className="wb-drop-buttons">
+                  <button
+                    type="button"
+                    className="wb-btn wb-btn-primary"
+                    disabled={isBusy}
+                    onClick={() => fileInputRef.current?.click()}
+                  >
+                    Choose File…
+                  </button>
+                  <button
+                    type="button"
+                    className="wb-btn wb-btn-outline"
+                    disabled={isBusy}
+                    onClick={() => void handleLoadMessyDemo()}
+                  >
+                    Stage Messy Fintech Demo (1,200 rows)
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="wb-review-box">
+                <div className="wb-review-top">
+                  <div>
+                    <strong>
+                      Type Veto Review: <code>{stagedReview.displayName}</code>
+                    </strong>
+                    <span className="wb-review-meta">
+                      Target: <code>{stagedReview.targetTableName}</code> ·{' '}
+                      {formatBytes(stagedReview.bytes)}
+                      {stagedReview.kind === 'xlsx'
+                        ? ` · ${stagedReview.date1904 ? '1904' : '1900'} UTC · ${stagedReview.rowCount} rows`
+                        : stagedReview.normInfo
+                          ? ` · ${stagedReview.normInfo.encoding} · delim "${stagedReview.normInfo.delimiter === '\t' ? '\\t' : stagedReview.normInfo.delimiter}"`
+                          : ' · Streaming direct read_csv'}
+                    </span>
+                  </div>
+                  <div className="wb-review-actions">
+                    <button
+                      type="button"
+                      className="wb-btn wb-btn-outline"
+                      onClick={() => {
+                        setStagedReview(null);
+                        setIngestModalOpen(false);
+                      }}
+                    >
+                      Discard
+                    </button>
+                    <button
+                      type="button"
+                      className="wb-btn wb-btn-primary"
+                      disabled={isBusy}
+                      onClick={() => void commitStagedReview()}
+                    >
+                      Commit Typed Load into DuckDB
+                    </button>
+                  </div>
+                </div>
+
+                {/* Normalization / XLSX Chips & Controls */}
+                {stagedReview.kind === 'csv' && stagedReview.normInfo ? (
+                  <div className="wb-pill-row">
+                    <span className="wb-tag">{stagedReview.normInfo.encoding}</span>
+                    {stagedReview.normInfo.hadMixedLineEndings ? (
+                      <span className="wb-tag wb-tag-ok">CRLF/CR normalized</span>
+                    ) : null}
+                    {stagedReview.normInfo.skippedBannerRows.length > 0 ? (
+                      <span className="wb-tag wb-tag-warn">
+                        Skipped {stagedReview.normInfo.skippedBannerRows.length} banner row(s)
+                      </span>
+                    ) : null}
+                    {stagedReview.normInfo.paddedShortRows > 0 ||
+                    stagedReview.normInfo.raggedRowAlerts.length > 0 ? (
+                      <span className="wb-tag wb-tag-warn">
+                        Aligned {stagedReview.normInfo.paddedShortRows} short /{' '}
+                        {stagedReview.normInfo.raggedRowAlerts.length} overflow ragged row(s)
+                      </span>
+                    ) : null}
+                    {stagedReview.normInfo.excludedFooterRows.length > 0 ||
+                    !stagedReview.excludeFooter ? (
+                      <button
+                        type="button"
+                        className="wb-pill"
+                        onClick={() =>
+                          void stageCsvTextOrFile({
+                            displayName: stagedReview.displayName,
+                            virtualName: stagedReview.virtualName,
+                            bytes: stagedReview.bytes,
+                            rawBytes: stagedReview.rawBytes,
+                            excludeFooter: !stagedReview.excludeFooter,
+                          })
+                        }
+                      >
+                        {stagedReview.excludeFooter
+                          ? `Excluded ${stagedReview.normInfo.excludedFooterRows.length} totals footer(s) (Restore)`
+                          : 'Restoring totals footer(s) (Exclude)'}
+                      </button>
+                    ) : null}
+                  </div>
+                ) : null}
+
+                {stagedReview.kind === 'xlsx' ? (
+                  <div className="wb-pill-row">
+                    <label className="wb-inline-label">
+                      Worksheet:
+                      <select
+                        aria-label="XLSX worksheet selector"
+                        value={stagedReview.selectedSheet}
+                        onChange={(e) => void switchStagedXlsxSheet(e.target.value)}
+                      >
+                        {stagedReview.sheets.map((s) => (
+                          <option key={s.name} value={s.name}>
+                            {s.name}
+                            {s.state !== 'visible' ? ` (${s.state})` : ''}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    {stagedReview.mergedCells.length > 0 ? (
+                      <span className="wb-tag">
+                        {stagedReview.mergedCells.length} merged range(s)
+                      </span>
+                    ) : null}
+                    {stagedReview.hiddenRowCount > 0 ? (
+                      <span className="wb-tag wb-tag-warn">
+                        {stagedReview.hiddenRowCount} hidden row(s)
+                      </span>
+                    ) : null}
+                    {stagedReview.warnings.map((w) => (
+                      <span key={w} className="wb-tag wb-tag-warn">
+                        {w}
+                      </span>
+                    ))}
+                  </div>
+                ) : null}
+
+                {stagedReview.hasDateAmbiguity ? (
+                  <div className="wb-date-resolver">
+                    <div className="wb-amber-banner">
+                      <IconAlertTriangle className="wb-ico-sm" />
+                      <div>
+                        <strong>Ambiguous slash dates detected</strong> — choose how dates parse:
+                      </div>
+                      <select
+                        aria-label="Date interpretation order"
+                        value={stagedReview.dateOrder}
+                        onChange={(e) =>
+                          setStagedReview({
+                            ...stagedReview,
+                            dateOrder: e.target.value as 'DMY' | 'MDY' | 'ISO',
+                          })
+                        }
+                      >
+                        <option value="DMY">Day-First (DD/MM/YYYY)</option>
+                        <option value="MDY">Month-First (MM/DD/YYYY)</option>
+                        <option value="ISO">Keep VARCHAR / ISO</option>
+                      </select>
+                    </div>
+
+                    {ambiguousCols[0]?.ambiguousDatePreviews ? (
+                      <div className="wb-dual-preview">
+                        {ambiguousCols[0].ambiguousDatePreviews.slice(0, 3).map((p) => (
+                          <span key={p.raw} className="wb-tag">
+                            <code>{p.raw}</code> → DMY: <strong>{p.asDmy}</strong> | MDY:{' '}
+                            <strong>{p.asMdy}</strong>
+                          </span>
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
+
+                <div className="wb-review-table-wrap">
+                  <table className="wb-mini-table">
+                    <thead>
+                      <tr>
+                        <th>Column</th>
+                        <th>Strict Type</th>
+                        <th>Confidence</th>
+                        <th>Override Type</th>
+                        <th>Veto / Locale Guards</th>
+                        <th>Sample Values (up to 5)</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {stagedReview.inferences.map((inf) => {
+                        const selected = stagedReview.overrides[inf.columnName] ?? inf.type;
+                        return (
+                          <tr key={inf.columnName}>
+                            <td>
+                              <strong>{inf.columnName}</strong>
+                            </td>
+                            <td>
+                              <span className="wb-tag">{inf.type}</span>
+                            </td>
+                            <td className="wb-mono">{Math.round(inf.confidence * 100)}%</td>
+                            <td>
+                              <select
+                                aria-label={`Type override for ${inf.columnName}`}
+                                value={selected}
+                                onChange={(e) =>
+                                  setStagedReview({
+                                    ...stagedReview,
+                                    overrides: {
+                                      ...stagedReview.overrides,
+                                      [inf.columnName]: e.target.value as LogicalType,
+                                    },
+                                  })
+                                }
+                              >
+                                {LOGICAL_TYPES.map((lt) => (
+                                  <option key={lt} value={lt}>
+                                    {lt}
+                                  </option>
+                                ))}
+                              </select>
+                            </td>
+                            <td>
+                              {inf.localeNumberFormat ? (
+                                <span className="wb-tag wb-tag-ok">{inf.localeNumberFormat}</span>
+                              ) : null}
+                              {inf.vetoReasons.length === 0 && !inf.localeNumberFormat ? (
+                                <span className="wb-muted">none</span>
+                              ) : (
+                                inf.vetoReasons.map((r) => (
+                                  <span key={r} className="wb-tag wb-tag-warn">
+                                    {r}
+                                  </span>
+                                ))
+                              )}
+                            </td>
+                            <td className="wb-mono">{inf.sampleValues.join(' | ')}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      ) : null}
 
       {/* Bottom Status Bar */}
       <footer className="wb-statusbar">
