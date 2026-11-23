@@ -1,6 +1,7 @@
 {
   "package": "@duckdb/duckdb-wasm",
   "version": "1.32.0",
+  "duckdbCoreVersion": "v1.4.3",
   "files": {
     "duckdb-eh.wasm": {
       "bytes": 34242586,
@@ -17,6 +18,24 @@
     "duckdb-browser-mvp.worker.js": {
       "bytes": 844644,
       "sha256": "b0387027f174e2b60c2d5cfa31cecca9b89d8a9762346b6449a784cd1c4dde3c"
+    }
+  },
+  "extensions": {
+    "v1.4.3/wasm_eh/parquet.duckdb_extension.wasm": {
+      "bytes": 3045039,
+      "sha256": "22765c8f7dc741cda2b571a66ac7bb355295d7d69a6c37e5315b265672984f55"
+    },
+    "v1.4.3/wasm_eh/json.duckdb_extension.wasm": {
+      "bytes": 820646,
+      "sha256": "b997276c8e15cc3ebdeda340d73d15dc1c4f4755ad281280451cb0a2f79302e9"
+    },
+    "v1.4.3/wasm_mvp/parquet.duckdb_extension.wasm": {
+      "bytes": 2867304,
+      "sha256": "0785c6c95d003eff4faa7b3b4b660f02c9c92f6d68d135ddf330d42e3a650600"
+    },
+    "v1.4.3/wasm_mvp/json.duckdb_extension.wasm": {
+      "bytes": 722006,
+      "sha256": "5771b6d57335eca8e2ba4fdaacb491a53b49577bd7f1b0c39e2cd7a39b4e9313"
     }
   }
 }

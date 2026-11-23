@@ -1,3 +1,6 @@
 packages:
   - 'apps/*'
   - 'packages/*'
+minimumReleaseAgeExclude:
+  - '@tanstack/react-virtual@3.14.28'
+  - '@tanstack/virtual-core@3.19.13'

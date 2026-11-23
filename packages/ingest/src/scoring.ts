@@ -1,4 +1,4 @@
-import type { ColumnInference, VetoReason } from './types';
+import type { AmbiguousDatePreview, ColumnInference, VetoReason } from './types';
 
 export const STRICT_INT_REGEX = /^[+-]?[0-9]+$/;
 export const LEADING_ZERO_REGEX = /^0[0-9]+$/;
@@ -9,6 +9,25 @@ export const SLASH_DATE_REGEX = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/;
 export const ID_COLUMN_NAME_REGEX =
   /(?:^|[_ -])(id|phone|mobile|tel|bvn|nin|ssn|tin|account|acct|zip|postal|pin|iban|card)(?:$|[_ -])/i;
 
+const US_CURRENCY_REGEX =
+  /^(?:(\()?\s*(?:[+-]\s*)?(?:₦|\$|£|€|NGN\s*|USD\s*|GBP\s*)?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?\)?)$/i;
+const EU_DECIMAL_REGEX = /^(?:\(?\s*[+-]?\s*(?:€\s*)?(?:\d{1,3}(?:\.\d{3})+|\d+),\d{1,4}\)?)$/;
+
+const MONTH_NAMES = [
+  'Jan',
+  'Feb',
+  'Mar',
+  'Apr',
+  'May',
+  'Jun',
+  'Jul',
+  'Aug',
+  'Sep',
+  'Oct',
+  'Nov',
+  'Dec',
+] as const;
+
 const INT64_MIN = -9223372036854775808n;
 const INT64_MAX = 9223372036854775807n;
 
@@ -16,6 +35,12 @@ function isValidCalendarDate(year: number, month: number, day: number): boolean 
   if (month < 1 || month > 12 || day < 1 || day > 31) return false;
   const d = new Date(Date.UTC(year, month - 1, day));
   return d.getUTCFullYear() === year && d.getUTCMonth() === month - 1 && d.getUTCDate() === day;
+}
+
+function formatUtcDatePreview(year: number, month: number, day: number): string {
+  const dd = String(day).padStart(2, '0');
+  const mon = MONTH_NAMES[month - 1] ?? String(month);
+  return `${dd} ${mon} ${year}`;
 }
 
 function fitsInt64(raw: string): boolean {
@@ -26,6 +51,49 @@ function fitsInt64(raw: string): boolean {
   } catch {
     return false;
   }
+}
+
+/** Parse US/NG currency or accounting negative like '₦1,250,000.50' or '(500.25)'. */
+export function parseUsCurrencyNumber(raw: string): number | null {
+  const trimmed = raw.trim();
+  if (!US_CURRENCY_REGEX.test(trimmed)) return null;
+  // Must carry explicit currency/comma/parens marker so normal ints/decimals stay distinct
+  if (!/[₦$£€(),]|NGN|USD|GBP/i.test(trimmed)) return null;
+
+  const isNegative = (trimmed.startsWith('(') && trimmed.endsWith(')')) || trimmed.includes('-');
+  const cleaned = trimmed.replace(/[^0-9.]/g, '');
+  if (!cleaned || !STRICT_DECIMAL_REGEX.test(cleaned)) return null;
+  const parsed = Number(cleaned);
+  if (!Number.isFinite(parsed)) return null;
+  return isNegative ? -parsed : parsed;
+}
+
+/** Parse European formatted decimal like '1.250.000,50' or '€1.250,50' or '(45,50)'. */
+export function parseEuDecimalNumber(raw: string): number | null {
+  const trimmed = raw.trim();
+  if (!EU_DECIMAL_REGEX.test(trimmed)) return null;
+
+  const isNegative = (trimmed.startsWith('(') && trimmed.endsWith(')')) || trimmed.includes('-');
+  const cleaned = trimmed
+    .replace(/[^0-9.,]/g, '')
+    .replace(/\./g, '')
+    .replace(',', '.');
+  if (!cleaned || !STRICT_DECIMAL_REGEX.test(cleaned)) return null;
+  const parsed = Number(cleaned);
+  return Number.isFinite(parsed) ? (isNegative ? -parsed : parsed) : null;
+}
+
+function collectSampleValues(nonEmpty: readonly string[], limit = 5): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const val of nonEmpty) {
+    if (!seen.has(val)) {
+      seen.add(val);
+      out.push(val);
+      if (out.length >= limit) break;
+    }
+  }
+  return out;
 }
 
 /**
@@ -47,6 +115,8 @@ export function scoreColumnSample(
 
   const totalCount = values.length;
   const nonNullCount = nonEmpty.length;
+  const sampleValues = collectSampleValues(nonEmpty, 5);
+
   if (nonNullCount === 0) {
     return {
       columnName,
@@ -54,6 +124,7 @@ export function scoreColumnSample(
       confidence: 0,
       vetoReasons: ['all_null'],
       dateAmbiguity: false,
+      sampleValues,
       nonNullCount: 0,
       totalCount,
     };
@@ -86,6 +157,7 @@ export function scoreColumnSample(
       confidence: 1,
       vetoReasons,
       dateAmbiguity: false,
+      sampleValues,
       nonNullCount,
       totalCount,
     };
@@ -104,6 +176,7 @@ export function scoreColumnSample(
       confidence: 1,
       vetoReasons: [],
       dateAmbiguity: false,
+      sampleValues,
       nonNullCount,
       totalCount,
     };
@@ -123,12 +196,28 @@ export function scoreColumnSample(
     }
 
     if (canBeDmy && canBeMdy) {
+      const previews: AmbiguousDatePreview[] = [];
+      for (const raw of sampleValues) {
+        const m = SLASH_DATE_REGEX.exec(raw);
+        if (!m) continue;
+        const p1 = Number(m[1]);
+        const p2 = Number(m[2]);
+        const y = Number(m[3]);
+        previews.push({
+          raw,
+          asDmy: formatUtcDatePreview(y, p2, p1),
+          asMdy: formatUtcDatePreview(y, p1, p2),
+        });
+      }
+
       return {
         columnName,
         type: 'VARCHAR',
         confidence: 0.5,
         vetoReasons: ['ambiguous_slash_date'],
         dateAmbiguity: true,
+        ambiguousDatePreviews: previews,
+        sampleValues,
         nonNullCount,
         totalCount,
       };
@@ -142,6 +231,7 @@ export function scoreColumnSample(
         vetoReasons: [],
         dateAmbiguity: false,
         detectedDateOrder: canBeDmy ? 'DMY' : 'MDY',
+        sampleValues,
         nonNullCount,
         totalCount,
       };
@@ -156,6 +246,7 @@ export function scoreColumnSample(
       confidence: 1,
       vetoReasons: [],
       dateAmbiguity: false,
+      sampleValues,
       nonNullCount,
       totalCount,
     };
@@ -169,12 +260,13 @@ export function scoreColumnSample(
       confidence: 1,
       vetoReasons: [],
       dateAmbiguity: false,
+      sampleValues,
       nonNullCount,
       totalCount,
     };
   }
 
-  // Finite DOUBLE: every value parses cleanly as a decimal number
+  // Plain finite DOUBLE: every value parses cleanly as a decimal number
   if (nonEmpty.every((v) => STRICT_DECIMAL_REGEX.test(v) && Number.isFinite(Number(v)))) {
     return {
       columnName,
@@ -182,6 +274,44 @@ export function scoreColumnSample(
       confidence: 1,
       vetoReasons: [],
       dateAmbiguity: false,
+      sampleValues,
+      nonNullCount,
+      totalCount,
+    };
+  }
+
+  // Locale US/NG currency & accounting negative numbers
+  if (
+    nonEmpty.some((v) => parseUsCurrencyNumber(v) !== null) &&
+    nonEmpty.every(
+      (v) =>
+        parseUsCurrencyNumber(v) !== null ||
+        (STRICT_DECIMAL_REGEX.test(v) && Number.isFinite(Number(v))),
+    )
+  ) {
+    return {
+      columnName,
+      type: 'DOUBLE',
+      confidence: 0.95,
+      vetoReasons: [],
+      dateAmbiguity: false,
+      localeNumberFormat: 'us_currency',
+      sampleValues,
+      nonNullCount,
+      totalCount,
+    };
+  }
+
+  // European decimal format (1.250.000,50 / €1.250,50)
+  if (nonEmpty.every((v) => parseEuDecimalNumber(v) !== null)) {
+    return {
+      columnName,
+      type: 'DOUBLE',
+      confidence: 0.95,
+      vetoReasons: [],
+      dateAmbiguity: false,
+      localeNumberFormat: 'eu_decimal',
+      sampleValues,
       nonNullCount,
       totalCount,
     };
@@ -193,6 +323,7 @@ export function scoreColumnSample(
     confidence: 1,
     vetoReasons: numericLikeCount > 0 ? ['mixed_types'] : [],
     dateAmbiguity: false,
+    sampleValues,
     nonNullCount,
     totalCount,
   };

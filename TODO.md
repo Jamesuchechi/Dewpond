@@ -36,18 +36,17 @@ All Milestone S spikes (S1–S9) plus replacement verification checks (R1–R3) 
 
 ---
 
-## Milestone M0 — Two-Page MPA & Privacy-Hardened Skeleton (IN PROGRESS, scaffold complete)
+## Milestone M0 — Two-Page MPA & Privacy-Hardened Skeleton (COMPLETED)
 
 **Goal:** Static zero-WASM landing page (`/`) + sealed dashboard (`/app/`) where you drop a 50 MB CSV/Parquet, run SQL, and see cached virtualized grid results — with `blob:`-worker CSP from day one.
 
-- [x] P0 Create pnpm Vite MPA workspace (`apps/web/index.html` landing `/` + `apps/web/app/index.html` workbench `/app/`, `packages/{recipe,ingest,pii,sqlkit,fixtures}`), TypeScript strict, ESLint (`no-restricted-globals`), Vitest + `fast-check`, GitHub Actions CI (`--frozen-lockfile --ignore-scripts`)
-- [x] P0 `scripts/fetch-duckdb.mjs` (pinned `@duckdb/duckdb-wasm@1.32.0` SHA-256 check via `scripts/duckdb-hashes.json`) + `scripts/verify-build.mjs` (fail on external `http(s)://` in `dist/`, verify `/` ships zero WASM, verify `<meta>` CSP) 🔒
-- [x] P0 Core `blob-worker.ts` + `duckdb.client.ts` + `compute.worker.ts` stub: `blob:`-wrapped DuckDB instantiation, serialized task queue, hard cancel via `worker.terminate()`, `<meta>` CSP on `/` & `/app/`, initial landing (`/`) & workbench (`/app/`) React shells 🔒
-- [ ] P0 Full Recipe replay wiring in `duckdb.client.ts` on hard-cancel reset + Playwright 3-browser CSP/offline E2E harness ⏱1.5d
-- [ ] P0 HTTP CSP header config for Cloudflare/Netlify + Service Worker offline precache + convenience network status indicator 🔒 ⏱0.5d
-- [ ] P0 Interactive dashboard UI: drag-and-drop / file picker (`BROWSER_FILEREADER`), CodeMirror 6 SQL editor, cached 500-row virtualized grid (`BigInt`/UTC-date safe) ⏱1.5d
+- [x] P0 Create pnpm Vite MPA workspace (`apps/web/index.html` landing `/` + `apps/web/app/index.html` workbench `/app/`, `packages/{recipe,ingest,pii,sqlkit,fixtures}`), TypeScript strict, ESLint (`no-restricted-globals`), Vitest + `fast-check`, Playwright, CI (`--frozen-lockfile --ignore-scripts`)
+- [x] P0 `scripts/fetch-duckdb.mjs` (pinned `@duckdb/duckdb-wasm@1.32.0` SHA-256 check via `scripts/duckdb-hashes.json`) + `scripts/verify-build.mjs` (fail on external `http(s)://` in `dist/`, verify `/` ships zero WASM, verify `<meta>` CSP, `_headers`, `sw.js`, `precache-manifest.json`) 🔒
+- [x] P0 Core `blob-worker.ts` + `duckdb.client.ts` + `compute.worker.ts`: `blob:`-wrapped DuckDB instantiation, serialized task queue, hard cancel (`worker.terminate()`) with full source/Recipe replay (`cancelAndReplay`) 🔒
+- [x] P0 Meta-CSP on `/` & `/app/`, HTTP CSP header config ([`apps/web/public/_headers`](./apps/web/public/_headers) for Cloudflare/Netlify), Service Worker offline precache ([`apps/web/public/sw.js`](./apps/web/public/sw.js) + `precache-manifest.json`), and convenience network status indicator 🔒
+- [x] P0 Landing page (`/`) + interactive workbench (`/app/`): drag-and-drop / file picker (`BROWSER_FILEREADER`), CodeMirror 6 SQL editor (`@codemirror/lang-sql`), cached 500-row virtualized grid (`@tanstack/react-virtual`, `BigInt`/UTC-date safe)
 
-**DoD (M0):** Playwright across Chromium + Firefox asserts (a) **0 external requests**, (b) worker `read_csv('http://...')` **blocked by CSP**, (c) offline reload works, (d) 50 MB CSV opens and queries without main-thread tasks > 50 ms, (e) hard cancel recovers cleanly.
+**DoD (M0):** Verified `2026-11-23` via `pnpm run test:e2e` ([`scripts/test-m0-e2e.mjs`](./scripts/test-m0-e2e.mjs)) across both **Chromium** and **Firefox** against built `dist/`: (a) **0 external requests** and zero WASM on `/`, (b) `blob:` worker cross-origin `fetch` & `read_csv('http://...')` **blocked by CSP** & `sqlkit`, (c) offline reload (`setOffline(true)`) loads & commits 1,200 rows cleanly, (d) 50.02 MB CSV (`1,018,000` rows) loads + runs `GROUP BY` (`47 ms` Chromium / `88 ms` Firefox) with `maxRafGapMs` = `24.5 ms` (Chromium) / `36 ms` (Firefox) and `29` virtualized DOM rows over cached 500-row Arrow pages, (e) **Hard Cancel** terminates DuckDB mid-query and replays base source + `@s1` cleanly.
 
 ---
 

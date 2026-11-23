@@ -25,6 +25,15 @@ export default [
     },
   },
   {
+    files: ['scripts/test-m0-e2e.mjs', 'scripts/test-m1-dod.mjs'],
+    languageOptions: {
+      globals: {
+        ...globals.node,
+        ...globals.browser,
+      },
+    },
+  },
+  {
     files: ['apps/web/src/**/*.{ts,tsx}', 'packages/**/*.ts'],
     languageOptions: {
       globals: globals.es2022,
@@ -64,6 +73,20 @@ export default [
   },
   {
     files: ['apps/web/src/workers/blob-worker.ts'],
+    rules: {
+      'no-restricted-globals': [
+        'error',
+        { name: 'XMLHttpRequest', message: NETWORK_RESTRICTION_MESSAGE },
+        { name: 'WebSocket', message: NETWORK_RESTRICTION_MESSAGE },
+        { name: 'EventSource', message: NETWORK_RESTRICTION_MESSAGE },
+      ],
+    },
+  },
+  {
+    files: ['apps/web/public/sw.js'],
+    languageOptions: {
+      globals: globals.serviceworker,
+    },
     rules: {
       'no-restricted-globals': [
         'error',

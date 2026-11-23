@@ -77,12 +77,36 @@ function main() {
 
   const landingHtmlPath = join(DIST_DIR, 'index.html');
   const appHtmlPath = join(DIST_DIR, 'app', 'index.html');
+  const headersPath = join(DIST_DIR, '_headers');
+  const swPath = join(DIST_DIR, 'sw.js');
+  const precachePath = join(DIST_DIR, 'precache-manifest.json');
   if (!existsSync(landingHtmlPath)) throw new Error('Missing built landing page dist/index.html');
   if (!existsSync(appHtmlPath)) throw new Error('Missing built workbench dist/app/index.html');
+  if (!existsSync(headersPath)) throw new Error('Missing HTTP CSP config dist/_headers');
+  if (!existsSync(swPath)) throw new Error('Missing offline Service Worker dist/sw.js');
+  if (!existsSync(precachePath)) throw new Error('Missing dist/precache-manifest.json');
 
   const landingHtml = readFileSync(landingHtmlPath, 'utf8');
   assertIncludes(landingHtml, 'http-equiv="Content-Security-Policy"', 'dist/index.html');
   assertIncludes(landingHtml, "connect-src 'none'", 'dist/index.html');
+  if (/sw\.js|serviceWorker/i.test(landingHtml)) {
+    throw new Error('Landing page dist/index.html should not reference sw.js.');
+  }
+
+  const headersText = readFileSync(headersPath, 'utf8');
+  assertIncludes(headersText, '/app/*', 'dist/_headers');
+  assertIncludes(headersText, '/duckdb/*', 'dist/_headers');
+  assertIncludes(headersText, "connect-src 'self'", 'dist/_headers');
+
+  const precacheManifest = JSON.parse(readFileSync(precachePath, 'utf8'));
+  if (!Array.isArray(precacheManifest.assets) || precacheManifest.assets.length < 6) {
+    throw new Error('dist/precache-manifest.json missing expected static assets.');
+  }
+  for (const entry of precacheManifest.assets) {
+    if (/^https?:\/\//i.test(entry)) {
+      throw new Error(`External origin in precache-manifest.json: ${entry}`);
+    }
+  }
 
   // Verify landing page HTML + all referenced local script/style assets pull zero WASM / DuckDB
   if (LANDING_FORBIDDEN_ENGINE_CODE.test(landingHtml)) {
@@ -143,6 +167,19 @@ function main() {
     if (actual.byteLength !== expected.bytes || actual.sha256 !== expected.sha256) {
       throw new Error(
         `Built dist/duckdb/${filename} digest mismatch: got ${actual.sha256} (${actual.byteLength} B)`,
+      );
+    }
+  }
+
+  for (const [relPath, expected] of Object.entries(manifest.extensions ?? {})) {
+    const distExt = join(DIST_DIR, 'duckdb', 'extensions', relPath);
+    if (!existsSync(distExt)) {
+      throw new Error(`Missing built DuckDB extension: dist/duckdb/extensions/${relPath}`);
+    }
+    const actual = sha256File(distExt);
+    if (actual.byteLength !== expected.bytes || actual.sha256 !== expected.sha256) {
+      throw new Error(
+        `Built dist/duckdb/extensions/${relPath} digest mismatch: got ${actual.sha256} (${actual.byteLength} B)`,
       );
     }
   }

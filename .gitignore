@@ -2,6 +2,7 @@ node_modules/
 **/dist/
 apps/web/public/duckdb/*.wasm
 apps/web/public/duckdb/*.worker.js
+apps/web/public/duckdb/extensions/
 coverage/
 .vite/
 *.tsbuildinfo
