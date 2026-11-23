@@ -17,6 +17,19 @@ export async function spawnBlobWorker(
     throw new Error(`Refusing cross-origin worker script URL: ${resolved.origin}`);
   }
 
+  // In Vite dev mode, workers are served as ES modules (/src/...?...&type=module).
+  // Creating a classic Blob URL worker causes: "Uncaught SyntaxError: Cannot use import statement outside a module".
+  const isModule =
+    options?.type === 'module' ||
+    resolved.searchParams.get('type') === 'module' ||
+    resolved.pathname.endsWith('.ts');
+
+  if (import.meta.env.DEV && isModule) {
+    // In dev, directly spawn the module worker (Vite dev server handles transform)
+    const worker = new Worker(resolved.href, { ...options, type: 'module' });
+    return { worker, revoke: () => undefined };
+  }
+
   const response = await fetch(resolved.href, { credentials: 'same-origin' });
   if (!response.ok) {
     throw new Error(
@@ -35,7 +48,7 @@ export async function spawnBlobWorker(
   };
 
   try {
-    const worker = new Worker(blobUrl, options);
+    const worker = new Worker(blobUrl, isModule ? { ...options, type: 'module' } : options);
     return { worker, revoke };
   } catch (err) {
     revoke();

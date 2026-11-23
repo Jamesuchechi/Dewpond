@@ -1,5 +1,15 @@
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import {
+  closeSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  openSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+  writeSync,
+} from 'node:fs';
 import { createRequire } from 'node:module';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -47,64 +57,97 @@ function buildFiftyMbFifteenColCsv(workDir) {
   };
 }
 
-async function generateFiveHundredMbParquet(workDir) {
+async function generateFiveHundredMbParquet(workDir, previewUrl) {
   const outFile = join(workDir, 'm1_500mb.parquet');
-  const require = createRequire(import.meta.url);
-  const duckdb = require(
-    join(ROOT_DIR, 'apps/web/node_modules/@duckdb/duckdb-wasm/dist/duckdb-node-blocking.cjs'),
-  );
-  const distDir = join(ROOT_DIR, 'apps/web/node_modules/@duckdb/duckdb-wasm/dist');
-  const bundles = {
-    mvp: { mainModule: join(distDir, 'duckdb-mvp.wasm'), mainWorker: '' },
-    eh: { mainModule: join(distDir, 'duckdb-eh.wasm'), mainWorker: '' },
-  };
-  const db = await duckdb.createDuckDB(
-    bundles,
-    new duckdb.ConsoleLogger(duckdb.LogLevel.WARNING),
-    duckdb.NODE_RUNTIME,
-  );
-  await db.instantiate(() => {});
-  db.open({ path: ':memory:' });
-  const conn = db.connect();
+  const browser = await chromium.launch({ headless: true });
+  try {
+    const page = await browser.newPage();
+    await page.goto(`${previewUrl}/app/`, { waitUntil: 'networkidle' });
+    await page.getByRole('button', { name: 'Boot Engine' }).click();
+    await page.locator('.wb-engine-pill', { hasText: 'Ready (' }).waitFor({ timeout: 30000 });
 
-  // ~4.16M rows Snappy Parquet ~505 MB on NVMe (~8 s generation)
-  const sampleFile = join(workDir, '_sample.parquet');
-  conn.query(`
-    COPY (
-      SELECT
-        'TX' || lpad(i::VARCHAR, 8, '0') AS tx_id,
-        '080' || lpad(((i * 7919) % 100000000)::VARCHAR, 8, '0') AS phone,
-        '22' || lpad(((i * 104729) % 1000000000)::VARCHAR, 9, '0') AS bvn,
-        'user' || i::VARCHAR || '@example.ng' AS email,
-        DATE '2025-01-01' + (i % 365)::INTEGER AS tx_date,
-        (((i * 137) % 950000) + (i % 99) / 100.0)::DOUBLE AS amount,
-        ((i % 50) + 1)::INTEGER AS qty,
-        CASE i % 6 WHEN 0 THEN 'POS' WHEN 1 THEN 'NIP' WHEN 2 THEN 'USSD' WHEN 3 THEN 'Card' WHEN 4 THEN 'Web' ELSE 'Mobile' END AS channel,
-        sha256(i::VARCHAR) || '_' || md5(i::VARCHAR) AS payload_sig
-      FROM range(50000) t(i)
-    ) TO '${sampleFile}' (FORMAT PARQUET, COMPRESSION SNAPPY, ROW_GROUP_SIZE 50000)
-  `);
-  const sampleBytes = statSync(sampleFile).size;
-  rmSync(sampleFile, { force: true });
-  const targetRows = Math.round((502 * 1024 * 1024) / (sampleBytes / 50000));
+    // Step 1: Benchmark exact snappy bytes per row using a 50k row sample
+    const sampleBytes = await page.evaluate(async () => {
+      const client = window.__dewpondClient;
+      await client.exec('INSTALL parquet; LOAD parquet;');
+      await client.exec(`
+        COPY (
+          SELECT
+            'TX' || lpad(i::VARCHAR, 8, '0') AS tx_id,
+            '080' || lpad(((i * 7919) % 100000000)::VARCHAR, 8, '0') AS phone,
+            '22' || lpad(((i * 104729) % 1000000000)::VARCHAR, 9, '0') AS bvn,
+            'user' || i::VARCHAR || '@example.ng' AS email,
+            DATE '2025-01-01' + (i % 365)::INTEGER AS tx_date,
+            (((i * 137) % 950000) + (i % 99) / 100.0)::DOUBLE AS amount,
+            ((i % 50) + 1)::INTEGER AS qty,
+            CASE i % 6 WHEN 0 THEN 'POS' WHEN 1 THEN 'NIP' WHEN 2 THEN 'USSD' WHEN 3 THEN 'Card' WHEN 4 THEN 'Web' ELSE 'Mobile' END AS channel,
+            sha256(i::VARCHAR) || '_' || md5(i::VARCHAR) AS payload_sig
+          FROM range(50000) t(i)
+        ) TO '_sample.parquet' (FORMAT PARQUET, COMPRESSION SNAPPY, ROW_GROUP_SIZE 50000);
+      `);
+      return await client.enqueue(async (_conn, db) => {
+        const buf = await db.copyFileToBuffer('_sample.parquet');
+        await db.dropFile('_sample.parquet');
+        return buf.byteLength;
+      });
+    });
 
-  conn.query(`
-    COPY (
-      SELECT
-        'TX' || lpad(i::VARCHAR, 8, '0') AS tx_id,
-        '080' || lpad(((i * 7919) % 100000000)::VARCHAR, 8, '0') AS phone,
-        '22' || lpad(((i * 104729) % 1000000000)::VARCHAR, 9, '0') AS bvn,
-        'user' || i::VARCHAR || '@example.ng' AS email,
-        DATE '2025-01-01' + (i % 365)::INTEGER AS tx_date,
-        (((i * 137) % 950000) + (i % 99) / 100.0)::DOUBLE AS amount,
-        ((i % 50) + 1)::INTEGER AS qty,
-        CASE i % 6 WHEN 0 THEN 'POS' WHEN 1 THEN 'NIP' WHEN 2 THEN 'USSD' WHEN 3 THEN 'Card' WHEN 4 THEN 'Web' ELSE 'Mobile' END AS channel,
-        sha256(i::VARCHAR) || '_' || md5(i::VARCHAR) AS payload_sig
-      FROM range(${targetRows}) t(i)
-    ) TO '${outFile}' (FORMAT PARQUET, COMPRESSION SNAPPY, ROW_GROUP_SIZE 100000)
-  `);
-  conn.close();
-  return { filePath: outFile, bytes: statSync(outFile).size, rows: targetRows };
+    const targetRows = Math.round((502 * 1024 * 1024) / (sampleBytes / 50000));
+    console.log(`Sample 50k rows: ${(sampleBytes / 1024 / 1024).toFixed(2)} MB. Target rows for ~502 MB: ${targetRows.toLocaleString('en-US')}`);
+
+    // Step 2: Generate the target parquet file in DuckDB and stream buffer in chunks to disk
+    await page.evaluate(async (rows) => {
+      const client = window.__dewpondClient;
+      await client.exec(`
+        COPY (
+          SELECT
+            'TX' || lpad(i::VARCHAR, 8, '0') AS tx_id,
+            '080' || lpad(((i * 7919) % 100000000)::VARCHAR, 8, '0') AS phone,
+            '22' || lpad(((i * 104729) % 1000000000)::VARCHAR, 9, '0') AS bvn,
+            'user' || i::VARCHAR || '@example.ng' AS email,
+            DATE '2025-01-01' + (i % 365)::INTEGER AS tx_date,
+            (((i * 137) % 950000) + (i % 99) / 100.0)::DOUBLE AS amount,
+            ((i % 50) + 1)::INTEGER AS qty,
+            CASE i % 6 WHEN 0 THEN 'POS' WHEN 1 THEN 'NIP' WHEN 2 THEN 'USSD' WHEN 3 THEN 'Card' WHEN 4 THEN 'Web' ELSE 'Mobile' END AS channel,
+            sha256(i::VARCHAR) || '_' || md5(i::VARCHAR) AS payload_sig
+          FROM range(${rows}) t(i)
+        ) TO '_full_500mb.parquet' (FORMAT PARQUET, COMPRESSION SNAPPY, ROW_GROUP_SIZE 100000);
+      `);
+    }, targetRows);
+
+    // Retrieve the file buffer in 32 MB chunks to avoid any single-call serialization bottleneck
+    const totalFileSize = await page.evaluate(async () => {
+      const client = window.__dewpondClient;
+      return await client.enqueue(async (_conn, db) => {
+        const buf = await db.copyFileToBuffer('_full_500mb.parquet');
+        window.__dewpondParquetExport = new Uint8Array(buf);
+        return buf.byteLength;
+      });
+    });
+
+    const fd = openSync(outFile, 'w');
+    const chunkSize = 16 * 1024 * 1024; // 16 MB chunks
+    for (let offset = 0; offset < totalFileSize; offset += chunkSize) {
+      const chunkLen = Math.min(chunkSize, totalFileSize - offset);
+      const chunkBytes = await page.evaluate(
+        ({ off, len }) => {
+          const arr = window.__dewpondParquetExport.subarray(off, off + len);
+          return Array.from(arr);
+        },
+        { off: offset, len: chunkLen },
+      );
+      writeSync(fd, Buffer.from(chunkBytes));
+    }
+    closeSync(fd);
+
+    await page.evaluate(() => {
+      delete window.__dewpondParquetExport;
+    });
+
+    return { filePath: outFile, bytes: statSync(outFile).size, rows: targetRows };
+  } finally {
+    await browser.close();
+  }
 }
 
 function buildXlsxTestFiles(workDir) {
@@ -352,17 +395,17 @@ async function main() {
   );
 
   try {
+    await waitForPreviewReady(`${BASE_URL}/`);
+
     const fiftyMb = buildFiftyMbFifteenColCsv(workDir);
     const xlsx = buildXlsxTestFiles(workDir);
     console.log(
-      `Built 50 MB CSV (${(fiftyMb.bytes / (1024 * 1024)).toFixed(2)} MB, ${fiftyMb.rows} rows). Generating 500 MB Parquet on NVMe...`,
+      `Built 50 MB CSV (${(fiftyMb.bytes / (1024 * 1024)).toFixed(2)} MB, ${fiftyMb.rows} rows). Generating 500 MB Parquet on NVMe via browser DuckDB...`,
     );
-    const parquet = await generateFiveHundredMbParquet(workDir);
+    const parquet = await generateFiveHundredMbParquet(workDir, BASE_URL);
     console.log(
       `Built 500 MB Snappy Parquet (${(parquet.bytes / (1024 * 1024)).toFixed(2)} MB, ${parquet.rows.toLocaleString('en-US')} rows).`,
     );
-
-    await waitForPreviewReady(`${BASE_URL}/`);
 
     const fixtures = { fiftyMb, xlsx, parquet };
     await runM1Browser('Chromium', chromium, fixtures);

@@ -213,6 +213,9 @@ export function WorkbenchShell() {
   if (!computeRef.current) {
     computeRef.current = new ComputeClient();
   }
+  if (import.meta.env.DEV && typeof window !== 'undefined') {
+    (window as unknown as { __dewpondClient?: DuckDBClient }).__dewpondClient = clientRef.current;
+  }
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const stagedSourceRef = useRef<{ file?: File; text?: string } | null>(null);
   const pageCacheRef = useRef<Map<string, QueryTableResult>>(new Map());

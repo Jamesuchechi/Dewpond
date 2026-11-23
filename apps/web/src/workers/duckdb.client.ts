@@ -127,6 +127,12 @@ export class DuckDBClient {
         await conn.query(`SET custom_extension_repository = ${lit(extRepoUrl)};`);
         await conn.query('SET autoinstall_known_extensions = true;');
         await conn.query('SET autoload_known_extensions = true;');
+        try {
+          await conn.query('INSTALL parquet;');
+          await conn.query('LOAD parquet;');
+        } catch {
+          // Non-fatal if extension load deferred
+        }
 
         const verRes = await conn.query('SELECT version() AS v');
         const version = String(verRes.toArray()[0]?.v ?? '1.32.0');
