@@ -402,3 +402,37 @@ export function buildTokenizationKeyMapJson(
   };
   return new TextEncoder().encode(JSON.stringify(payload, null, 2));
 }
+
+/** Compile active pipeline steps into a runnable pandas or Polars Python script using DuckDB. */
+export function buildPythonPipelineExport(
+  target: 'pandas' | 'polars',
+  recipeName: string,
+  activeAlias: string,
+  steps: readonly HtmlReportStepSummary[],
+): Uint8Array {
+  const importLine = target === 'pandas' ? 'import pandas as pd' : 'import polars as pl';
+  const dfExpr = target === 'pandas' ? 'df: pd.DataFrame' : 'df: pl.DataFrame';
+  const method = target === 'pandas' ? '.df()' : '.pl()';
+
+  const stepBlocks = steps.map(
+    (s) => `# Step ${s.stepId}: ${s.label}\ncon.execute(${JSON.stringify(s.sql)})`,
+  );
+
+  const script = [
+    `"""Dewpond ${target} pipeline — ${recipeName}"""`,
+    'import duckdb',
+    importLine,
+    '',
+    'con = duckdb.connect(":memory:")',
+    '# Load your local source table(s) into DuckDB before executing steps, e.g.:',
+    `# con.execute('CREATE TABLE "${activeAlias.split('@')[0] || 'source'}" AS SELECT * FROM read_csv_auto("input.csv")')`,
+    '',
+    ...stepBlocks,
+    '',
+    `${dfExpr} = con.sql(${JSON.stringify(`SELECT * FROM "${activeAlias}"`)})${method}`,
+    'print(df.head())',
+    '',
+  ].join('\n');
+
+  return new TextEncoder().encode(script);
+}

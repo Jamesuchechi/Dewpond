@@ -42,6 +42,7 @@ import {
   buildJsonExportBytes,
   buildNdjsonExportBytes,
   buildParquetExportBytes,
+  buildPythonPipelineExport,
   buildSelfContainedHtmlReport,
   buildTokenizationKeyMapJson,
   buildXlsxExportBytes,
@@ -512,6 +513,22 @@ export function WorkbenchShell() {
   const sqlSchema: Record<string, string[]> = Object.fromEntries(
     tables.map((t) => [t.alias, t.columns.map((c) => c.name)]),
   );
+
+  // PWA File Handling API (launchQueue) registration
+  useEffect(() => {
+    const win = window as unknown as {
+      launchQueue?: {
+        setConsumer: (
+          cb: (params: { files: Array<{ getFile: () => Promise<File> }> }) => void,
+        ) => void;
+      };
+    };
+    win.launchQueue?.setConsumer((launchParams) => {
+      const firstHandle = launchParams.files?.[0];
+      if (!firstHandle) return;
+      void firstHandle.getFile().then((file) => ingestLocalFile(file));
+    });
+  }, []);
 
   async function refreshMemoryGauge(): Promise<void> {
     const client = clientRef.current;
@@ -4522,6 +4539,50 @@ export function WorkbenchShell() {
                           }
                         >
                           <IconDownload className="wb-ico-xs" /> Export .sql Script
+                        </button>
+                        <button
+                          type="button"
+                          className="wb-btn wb-btn-outline"
+                          onClick={() =>
+                            triggerBlobDownload(
+                              'dewpond_pandas.py',
+                              buildPythonPipelineExport(
+                                'pandas',
+                                recipe.name,
+                                activeTable?.alias ?? 'dataset',
+                                stepSnapshots.slice(0, recipe.head).map((s) => ({
+                                  stepId: s.stepId,
+                                  label: s.label,
+                                  sql: s.sql,
+                                })),
+                              ),
+                              'text/x-python;charset=utf-8',
+                            )
+                          }
+                        >
+                          <IconDownload className="wb-ico-xs" /> Export pandas (.py)
+                        </button>
+                        <button
+                          type="button"
+                          className="wb-btn wb-btn-outline"
+                          onClick={() =>
+                            triggerBlobDownload(
+                              'dewpond_polars.py',
+                              buildPythonPipelineExport(
+                                'polars',
+                                recipe.name,
+                                activeTable?.alias ?? 'dataset',
+                                stepSnapshots.slice(0, recipe.head).map((s) => ({
+                                  stepId: s.stepId,
+                                  label: s.label,
+                                  sql: s.sql,
+                                })),
+                              ),
+                              'text/x-python;charset=utf-8',
+                            )
+                          }
+                        >
+                          <IconDownload className="wb-ico-xs" /> Export Polars (.py)
                         </button>
                       </div>
                     </div>

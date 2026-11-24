@@ -4,6 +4,7 @@ import {
   buildCsvExportBytes,
   buildNdjsonExportBytes,
   buildParquetExportBytes,
+  buildPythonPipelineExport,
   buildSelfContainedHtmlReport,
   buildTokenizationKeyMapJson,
   buildXlsxExportBytes,
@@ -92,5 +93,31 @@ describe('M3 exporters', () => {
     expect(parsed.format).toBe('dewpond-token-keymap/v1');
     expect(parsed.entryCount).toBe(1);
     expect(parsed.entries[0]?.token).toBe('deadbeef');
+  });
+
+  it('exports runnable pandas and Polars Python pipelines', () => {
+    const pdScript = new TextDecoder().decode(
+      buildPythonPipelineExport('pandas', 'Payroll', 'payroll@s1', [
+        {
+          stepId: 's1',
+          label: 'Trim',
+          sql: 'CREATE TABLE "payroll@s1" AS SELECT * FROM "payroll";',
+        },
+      ]),
+    );
+    expect(pdScript).toContain('import pandas as pd');
+    expect(pdScript).toContain('.df()');
+
+    const plScript = new TextDecoder().decode(
+      buildPythonPipelineExport('polars', 'Payroll', 'payroll@s1', [
+        {
+          stepId: 's1',
+          label: 'Trim',
+          sql: 'CREATE TABLE "payroll@s1" AS SELECT * FROM "payroll";',
+        },
+      ]),
+    );
+    expect(plScript).toContain('import polars as pl');
+    expect(plScript).toContain('.pl()');
   });
 });

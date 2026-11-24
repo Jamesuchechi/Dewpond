@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  createStepPluginRegistry,
   decodeShareRecipe,
   detectSchemaDrift,
   encodeShareRecipe,
@@ -168,5 +169,25 @@ describe('@dewpond/recipe', () => {
       expect(JSON.stringify(decoded.recipe)).not.toContain('private@secret.test');
       expect(JSON.stringify(decoded.recipe)).not.toContain('inserted@secret.test');
     }
+  });
+
+  it('registers and compiles custom step plugins via createStepPluginRegistry', () => {
+    const registry = createStepPluginRegistry();
+    registry.register({
+      id: 'normalize_currency',
+      label: 'Normalize Currency',
+      description: 'Rounds numeric column to 2 decimal places',
+      compileSql: ({ sourceAlias, targetAlias, params }) =>
+        `CREATE OR REPLACE TABLE "${targetAlias}" AS SELECT *, round("${String(params.col)}", 2) AS "rounded" FROM "${sourceAlias}"`,
+    });
+
+    expect(registry.list()).toHaveLength(1);
+    const sql = registry.compile('normalize_currency', {
+      sourceAlias: 'orders',
+      targetAlias: 'orders@s1',
+      params: { col: 'amount' },
+    });
+    expect(sql).toContain('round("amount", 2)');
+    expect(sql.endsWith(';')).toBe(true);
   });
 });

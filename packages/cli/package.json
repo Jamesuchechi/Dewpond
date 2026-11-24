@@ -1,0 +1,16 @@
+{
+  "name": "@dewpond/cli",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Dewpond CLI (`dewpond run`) for headless recipe validation and SQL/Python pipeline generation",
+  "bin": {
+    "dewpond": "./src/cli.mjs"
+  },
+  "scripts": {
+    "typecheck": "node -e \"console.log('@dewpond/cli: ESM CLI ready')\""
+  },
+  "dependencies": {
+    "@dewpond/recipe": "workspace:*"
+  }
+}

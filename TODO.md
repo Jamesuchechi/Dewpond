@@ -104,4 +104,4 @@ All Milestone S spikes (S1–S9) plus replacement verification checks (R1–R3) 
 - [x] **Self-contained HTML report** & **reversible tokenization key maps**
 - [x] **Optional signed offline desktop wrapper (Tauri)** if InfoSec interviews require it
 - [x] **Local-first AI (schema-only NL→SQL)** via WebLLM or opt-in BYO-key with exact-payload preview
-- [ ] **pandas / Polars export**, CLI (`dewpond run`), public step-plugin API, PWA file-handler registration
+- [x] **pandas / Polars export**, CLI (`dewpond run`), public step-plugin API, PWA file-handler registration

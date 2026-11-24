@@ -1,0 +1,23 @@
+{
+  "name": "Dewpond Workbench",
+  "short_name": "Dewpond",
+  "start_url": "/app/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#0a1628",
+  "theme_color": "#1d4ed8",
+  "file_handlers": [
+    {
+      "action": "/app/",
+      "accept": {
+        "text/csv": [".csv"],
+        "text/tab-separated-values": [".tsv"],
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": [".xlsx"],
+        "application/vnd.apache.parquet": [".parquet"],
+        "application/json": [".json"],
+        "application/x-ndjson": [".ndjson"],
+        "application/octet-stream": [".duckdb"]
+      }
+    }
+  ]
+}

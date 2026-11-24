@@ -197,6 +197,8 @@ importers:
         specifier: 5.1.1
         version: 5.1.1(@types/node@24.19.2)(vite@8.3.8(@types/node@24.19.2))
 
+  apps/desktop: {}
+
   apps/web:
     dependencies:
       '@codemirror/autocomplete':
@@ -275,6 +277,12 @@ importers:
       vite:
         specifier: 8.3.8
         version: 8.3.8(@types/node@24.19.2)
+
+  packages/cli:
+    dependencies:
+      '@dewpond/recipe':
+        specifier: workspace:*
+        version: link:../recipe
 
   packages/fixtures:
     dependencies:

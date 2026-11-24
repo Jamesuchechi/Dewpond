@@ -28,6 +28,12 @@ export {
   type ShareLiteralFinding,
 } from './share';
 export {
+  createStepPluginRegistry,
+  type StepPluginContext,
+  type StepPluginDefinition,
+  type StepPluginRegistry,
+} from './plugin';
+export {
   RECIPE_JSON_SCHEMA,
   detectSchemaDrift,
   remapRecipeColumns,
