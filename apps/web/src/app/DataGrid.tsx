@@ -1,4 +1,4 @@
-import { useRef } from 'react';
+import { useRef, useState } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import type { QueryTableResult } from './arrowFormat';
 
@@ -7,6 +7,7 @@ export interface TablePageNav {
   pageSize: number;
   totalRows: number;
   cacheHit: boolean;
+  keyset?: boolean;
   onChangePage: (nextPage: number) => void;
 }
 
@@ -15,10 +16,28 @@ interface DataGridProps {
   result: QueryTableResult | null;
   error?: string | null;
   pageNav?: TablePageNav | null;
+  editable?: boolean;
+  onEditCell?: (rid: string, column: string, nextValue: string | null) => void;
+  onInsertRowAfter?: (afterOrd: number, afterRid: string) => void;
+  onDeleteRow?: (rid: string) => void;
 }
 
-export function DataGrid({ title, result, error, pageNav }: DataGridProps) {
+export function DataGrid({
+  title,
+  result,
+  error,
+  pageNav,
+  editable = false,
+  onEditCell,
+  onInsertRowAfter,
+  onDeleteRow,
+}: DataGridProps) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  const [editingCell, setEditingCell] = useState<{
+    rowIdx: number;
+    colName: string;
+    draft: string;
+  } | null>(null);
   const rowCount = result?.rows.length ?? 0;
 
   const virtualizer = useVirtualizer({
@@ -77,7 +96,8 @@ export function DataGrid({ title, result, error, pageNav }: DataGridProps) {
           </span>
           {pageNav ? (
             <span className={pageNav.cacheHit ? 'wb-tag wb-tag-ok' : 'wb-tag'}>
-              500-row Arrow page {pageNav.cacheHit ? 'CACHE HIT' : 'LOADED'}
+              {pageNav.keyset ? 'Keyset' : '500-row'} Arrow page{' '}
+              {pageNav.cacheHit ? 'CACHE HIT' : 'LOADED'}
             </span>
           ) : null}
         </div>
@@ -133,14 +153,99 @@ export function DataGrid({ title, result, error, pageNav }: DataGridProps) {
             {virtualItems.map((vRow) => {
               const row = result.rows[vRow.index];
               if (!row) return null;
+              const ridColIdx = result.columns.findIndex((c) => c.name === '__rid');
+              const ordColIdx = result.columns.findIndex((c) => c.name === '__ord');
+              const ridVal = ridColIdx >= 0 ? (row[ridColIdx] ?? null) : null;
+              const ordVal = ordColIdx >= 0 ? Number(row[ordColIdx]) : Number(ridVal);
+              const canEditRow = editable && ridVal !== null && ridVal !== 'NULL';
+
               return (
                 <tr key={vRow.key} data-index={vRow.index}>
-                  <td className="wb-row-idx">{baseOffset + vRow.index + 1}</td>
-                  {row.map((cell, colIdx) => (
-                    <td key={colIdx} className={cell === 'NULL' ? 'wb-null-cell' : undefined}>
-                      {cell === 'NULL' ? <span className="wb-null-pill">NULL</span> : cell}
-                    </td>
-                  ))}
+                  <td className="wb-row-idx">
+                    <span>{baseOffset + vRow.index + 1}</span>
+                    {canEditRow && onInsertRowAfter && onDeleteRow ? (
+                      <span className="wb-row-ops">
+                        <button
+                          type="button"
+                          className="wb-row-op-btn"
+                          title="Insert row below (fractional ord)"
+                          aria-label={`Insert row after ${ridVal}`}
+                          onClick={() =>
+                            onInsertRowAfter(
+                              Number.isFinite(ordVal) ? ordVal : baseOffset + vRow.index + 1,
+                              ridVal,
+                            )
+                          }
+                        >
+                          +
+                        </button>
+                        <button
+                          type="button"
+                          className="wb-row-op-btn"
+                          title="Delete row"
+                          aria-label={`Delete row ${ridVal}`}
+                          onClick={() => onDeleteRow(ridVal)}
+                        >
+                          ×
+                        </button>
+                      </span>
+                    ) : null}
+                  </td>
+                  {row.map((cell, colIdx) => {
+                    const col = result.columns[colIdx]!;
+                    const isSystemCol = col.name === '__rid' || col.name === '__ord';
+                    const isEditing =
+                      editingCell?.rowIdx === vRow.index && editingCell.colName === col.name;
+
+                    if (isEditing) {
+                      return (
+                        <td key={colIdx} className="wb-editing-cell">
+                          <input
+                            type="text"
+                            autoFocus
+                            aria-label={`Edit cell ${col.name}`}
+                            className="wb-cell-input"
+                            value={editingCell.draft}
+                            onChange={(e) =>
+                              setEditingCell({ ...editingCell, draft: e.target.value })
+                            }
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') {
+                                const nextVal = editingCell.draft === '' ? null : editingCell.draft;
+                                setEditingCell(null);
+                                if (ridVal) onEditCell?.(ridVal, col.name, nextVal);
+                              } else if (e.key === 'Escape') {
+                                setEditingCell(null);
+                              }
+                            }}
+                            onBlur={() => {
+                              const nextVal = editingCell.draft === '' ? null : editingCell.draft;
+                              setEditingCell(null);
+                              if (ridVal) onEditCell?.(ridVal, col.name, nextVal);
+                            }}
+                          />
+                        </td>
+                      );
+                    }
+
+                    return (
+                      <td
+                        key={colIdx}
+                        className={cell === 'NULL' ? 'wb-null-cell' : undefined}
+                        title={canEditRow && !isSystemCol ? 'Double-click to edit cell' : undefined}
+                        onDoubleClick={() => {
+                          if (!canEditRow || isSystemCol || !onEditCell) return;
+                          setEditingCell({
+                            rowIdx: vRow.index,
+                            colName: col.name,
+                            draft: cell === 'NULL' || cell === null ? '' : cell,
+                          });
+                        }}
+                      >
+                        {cell === 'NULL' ? <span className="wb-null-pill">NULL</span> : cell}
+                      </td>
+                    );
+                  })}
                 </tr>
               );
             })}

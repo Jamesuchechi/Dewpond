@@ -228,7 +228,7 @@ async function runBrowserSuite(name, browserType, fiftyMbInfo) {
     await page.locator('.wb-page-num', { hasText: 'Page 2 /' }).waitFor({ timeout: 10000 });
     await page.getByRole('button', { name: 'Prev 500' }).click();
     await page
-      .locator('.wb-tag-ok', { hasText: '500-row Arrow page CACHE HIT' })
+      .locator('.wb-tag-ok', { hasText: /(500-row|Keyset) Arrow page CACHE HIT/ })
       .waitFor({ timeout: 5000 });
 
     // Switch to CodeMirror SQL editor and query the 50 MB table

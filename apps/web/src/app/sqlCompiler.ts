@@ -1,5 +1,5 @@
 import type { LocaleNumberFormat } from '@dewpond/ingest';
-import type { LogicalType, RedactAction, Step } from '@dewpond/recipe';
+import type { EditOverlay, LogicalType, RedactAction, Step } from '@dewpond/recipe';
 import { ident, lit } from '@dewpond/sqlkit';
 import type { GridColumnMeta } from './arrowFormat';
 
@@ -738,4 +738,406 @@ SELECT
   count(*) FILTER (WHERE "__diff_status" = 'changed')::BIGINT AS changed_count,
   count(*) FILTER (WHERE "__diff_status" = 'unchanged')::BIGINT AS unchanged_count
 FROM _diff;`;
+}
+
+/**
+ * Compile a local cell/row edit overlay keyed by __rid with fractional ord DOUBLE ordering
+ * into a materialized DuckDB TABLE.
+ */
+export function compileCellRowOverlaySql(
+  sourceAlias: string,
+  targetAlias: string,
+  columns: readonly GridColumnMeta[],
+  overlay: EditOverlay,
+): string {
+  const userCols = columns.filter((c) => c.name !== '__rid' && c.name !== '__ord');
+  const editsByCol = new Map<string, Array<{ rid: string; value: string | null }>>();
+  for (const edit of overlay.cellEdits) {
+    const list = editsByCol.get(edit.column) ?? [];
+    list.push({ rid: edit.rid, value: edit.value });
+    editsByCol.set(edit.column, list);
+  }
+
+  const baseProjections = userCols.map((col) => {
+    const colId = ident(col.name);
+    const colEdits = editsByCol.get(col.name);
+    if (!colEdits || colEdits.length === 0) {
+      return colId;
+    }
+    const whenClauses = colEdits
+      .map((e) => {
+        const valExpr =
+          e.value === null
+            ? 'NULL'
+            : col.type.includes('Int')
+              ? `try_cast(${lit(e.value)} AS BIGINT)`
+              : col.type.includes('Float') || col.type.includes('Double')
+                ? `try_cast(${lit(e.value)} AS DOUBLE)`
+                : col.type.includes('Bool')
+                  ? `try_cast(${lit(e.value)} AS BOOLEAN)`
+                  : col.type === 'Date32<DAY>' || col.type.includes('Date')
+                    ? `try_cast(${lit(e.value)} AS DATE)`
+                    : lit(e.value);
+        return `WHEN "__rid"::VARCHAR = ${lit(e.rid)} THEN ${valExpr}`;
+      })
+      .join(' ');
+    return `CASE ${whenClauses} ELSE ${colId} END AS ${colId}`;
+  });
+
+  const deleteFilter =
+    overlay.deletedRids.length > 0
+      ? `\nWHERE "__rid"::VARCHAR NOT IN (${overlay.deletedRids.map((r) => lit(r)).join(', ')})`
+      : '';
+
+  const baseSelect = `SELECT
+  "__rid"::BIGINT AS "__rid",
+  "__rid"::DOUBLE AS "__ord",
+  ${baseProjections.join(',\n  ')}
+FROM ${ident(sourceAlias)}${deleteFilter}`;
+
+  const insertSelects = overlay.insertedRows.map((row) => {
+    const colExprs = userCols.map((col) => {
+      const val = row.values[col.name] ?? null;
+      if (val === null) return `NULL AS ${ident(col.name)}`;
+      if (col.type.includes('Int')) return `try_cast(${lit(val)} AS BIGINT) AS ${ident(col.name)}`;
+      if (col.type.includes('Float') || col.type.includes('Double')) {
+        return `try_cast(${lit(val)} AS DOUBLE) AS ${ident(col.name)}`;
+      }
+      if (col.type.includes('Bool'))
+        return `try_cast(${lit(val)} AS BOOLEAN) AS ${ident(col.name)}`;
+      return `${lit(val)}::VARCHAR AS ${ident(col.name)}`;
+    });
+    return `SELECT
+  ${lit(Number(row.rid) || 0)}::BIGINT AS "__rid",
+  ${lit(row.ord)}::DOUBLE AS "__ord",
+  ${colExprs.join(',\n  ')}`;
+  });
+
+  const combined =
+    insertSelects.length > 0
+      ? `${baseSelect}\nUNION ALL\n${insertSelects.join('\nUNION ALL\n')}`
+      : baseSelect;
+
+  return `CREATE OR REPLACE TABLE ${ident(targetAlias)} AS
+SELECT *
+FROM (
+${combined}
+) _edited
+ORDER BY "__ord" ASC, "__rid" ASC;`;
+}
+
+export interface KeysetPageSqlOptions {
+  alias: string;
+  pageSize: number;
+  hasRid: boolean;
+  hasOrd: boolean;
+  direction?: 'first' | 'next' | 'prev';
+  cursorOrd?: number;
+  cursorRid?: string;
+  fallbackOffset?: number;
+}
+
+/** Build O(log N) keyset-paged SQL over ("__ord", "__rid") or ("__rid") when available. */
+export function buildKeysetPageSql(opts: KeysetPageSqlOptions): string {
+  const tbl = ident(opts.alias);
+  const limit = Math.max(1, Math.floor(opts.pageSize));
+
+  if (!opts.hasRid) {
+    const offset = Math.max(0, Math.floor(opts.fallbackOffset ?? 0));
+    return `SELECT * FROM ${tbl} LIMIT ${limit} OFFSET ${offset};`;
+  }
+
+  const orderCol = opts.hasOrd ? '"__ord"' : '"__rid"';
+  const dir = opts.direction ?? 'first';
+
+  if (dir === 'first' || opts.cursorRid === undefined) {
+    return `SELECT * FROM ${tbl} ORDER BY ${orderCol} ASC, "__rid" ASC LIMIT ${limit};`;
+  }
+
+  const cursorOrd = opts.cursorOrd ?? Number(opts.cursorRid);
+  const cursorRidNum = Number(opts.cursorRid);
+  if (!Number.isFinite(cursorOrd) || !Number.isFinite(cursorRidNum)) {
+    const offset = Math.max(0, Math.floor(opts.fallbackOffset ?? 0));
+    return `SELECT * FROM ${tbl} ORDER BY ${orderCol} ASC, "__rid" ASC LIMIT ${limit} OFFSET ${offset};`;
+  }
+
+  if (dir === 'next') {
+    return `SELECT * FROM ${tbl}
+WHERE (${orderCol} > ${lit(cursorOrd)} OR (${orderCol} = ${lit(cursorOrd)} AND "__rid" > ${lit(cursorRidNum)}))
+ORDER BY ${orderCol} ASC, "__rid" ASC
+LIMIT ${limit};`;
+  }
+
+  return `SELECT * FROM (
+  SELECT * FROM ${tbl}
+  WHERE (${orderCol} < ${lit(cursorOrd)} OR (${orderCol} = ${lit(cursorOrd)} AND "__rid" < ${lit(cursorRidNum)}))
+  ORDER BY ${orderCol} DESC, "__rid" DESC
+  LIMIT ${limit}
+) _prev
+ORDER BY ${orderCol} ASC, "__rid" ASC;`;
+}
+
+export type BlockingMode = 'prefix_3' | 'first_token' | 'none';
+
+function blockingExprSql(colSql: string, mode: BlockingMode): string {
+  const norm = `lower(trim(coalesce(${colSql}::VARCHAR, '')))`;
+  if (mode === 'prefix_3') return `left(${norm}, 3)`;
+  if (mode === 'first_token') return `split_part(${norm}, ' ', 1)`;
+  return `'1'`;
+}
+
+export interface FuzzyDedupeOptions {
+  tableAlias: string;
+  matchColumn: string;
+  blockingMode: BlockingMode;
+  minSimilarity: number;
+  numericColumn?: string;
+  numericTolerance?: number;
+  limit?: number;
+}
+
+/** Build blocking + Jaro-Winkler + numeric tolerance candidate pairs for Fuzzy Dedupe review queue. */
+export function buildFuzzyDedupeCandidatesSql(opts: FuzzyDedupeOptions): string {
+  const tbl = ident(opts.tableAlias);
+  const col = ident(opts.matchColumn);
+  const blockA = blockingExprSql(`A.${col}`, opts.blockingMode);
+  const blockB = blockingExprSql(`B.${col}`, opts.blockingMode);
+  const normA = `lower(trim(coalesce(A.${col}::VARCHAR, '')))`;
+  const normB = `lower(trim(coalesce(B.${col}::VARCHAR, '')))`;
+  const simExpr = `round(jaro_winkler_similarity(${normA}, ${normB}), 4)`;
+  const distExpr = `levenshtein(${normA}, ${normB})::INTEGER`;
+  const minSim = Math.max(0.5, Math.min(1, opts.minSimilarity));
+
+  const tolClause =
+    opts.numericColumn &&
+    opts.numericTolerance !== undefined &&
+    Number.isFinite(opts.numericTolerance)
+      ? `\n  AND abs(try_cast(A.${ident(opts.numericColumn)} AS DOUBLE) - try_cast(B.${ident(opts.numericColumn)} AS DOUBLE)) <= ${lit(Math.max(0, opts.numericTolerance))}`
+      : '';
+
+  return `SELECT
+  A."__rid"::VARCHAR AS "keep_rid",
+  B."__rid"::VARCHAR AS "drop_rid",
+  A.${col}::VARCHAR AS "left_value",
+  B.${col}::VARCHAR AS "right_value",
+  ${simExpr} AS "__similarity",
+  ${distExpr} AS "__edit_dist"
+FROM ${tbl} A
+JOIN ${tbl} B
+  ON ${blockA} = ${blockB}
+ AND A."__rid" < B."__rid"
+WHERE ${normA} <> ''
+  AND ${normB} <> ''
+  AND jaro_winkler_similarity(${normA}, ${normB}) >= ${lit(minSim)}${tolClause}
+ORDER BY "__similarity" DESC, A."__rid" ASC, B."__rid" ASC
+LIMIT ${Math.max(1, opts.limit ?? 200)};`;
+}
+
+/** Commit approved Fuzzy Dedupe drops into a deterministic materialized table. */
+export function buildFuzzyDedupeCommitSql(
+  sourceAlias: string,
+  targetAlias: string,
+  dropRids: readonly string[],
+): string {
+  const whereClause =
+    dropRids.length > 0
+      ? `\nWHERE "__rid"::VARCHAR NOT IN (${dropRids.map((r) => lit(r)).join(', ')})`
+      : '';
+  return `CREATE OR REPLACE TABLE ${ident(targetAlias)} AS
+SELECT *
+FROM ${ident(sourceAlias)}${whereClause}
+ORDER BY "__rid" ASC;`;
+}
+
+export interface FuzzyReconcileOptions {
+  leftAlias: string;
+  rightAlias: string;
+  keyColumn: string;
+  blockingMode: BlockingMode;
+  minSimilarity: number;
+  numericColumn?: string;
+  numericTolerance?: number;
+  limit?: number;
+}
+
+/** Build blocking + tolerance Fuzzy Reconcile query across two tables. */
+export function buildFuzzyReconcileSql(opts: FuzzyReconcileOptions): string {
+  const leftTbl = ident(opts.leftAlias);
+  const rightTbl = ident(opts.rightAlias);
+  const keyCol = ident(opts.keyColumn);
+  const blockL = blockingExprSql(`L.${keyCol}`, opts.blockingMode);
+  const blockR = blockingExprSql(`R.${keyCol}`, opts.blockingMode);
+  const normL = `lower(trim(coalesce(L.${keyCol}::VARCHAR, '')))`;
+  const normR = `lower(trim(coalesce(R.${keyCol}::VARCHAR, '')))`;
+  const simExpr = `round(jaro_winkler_similarity(${normL}, ${normR}), 4)`;
+  const minSim = Math.max(0.5, Math.min(1, opts.minSimilarity));
+
+  const tolClause =
+    opts.numericColumn &&
+    opts.numericTolerance !== undefined &&
+    Number.isFinite(opts.numericTolerance)
+      ? `\n AND abs(try_cast(L.${ident(opts.numericColumn)} AS DOUBLE) - try_cast(R.${ident(opts.numericColumn)} AS DOUBLE)) <= ${lit(Math.max(0, opts.numericTolerance))}`
+      : '';
+
+  return `SELECT
+  CASE
+    WHEN ${simExpr} >= 0.95 THEN 'auto_matched'
+    ELSE 'review_queue'
+  END AS "__reconcile_status",
+  ${simExpr} AS "__similarity",
+  L.${keyCol}::VARCHAR AS "left_key",
+  R.${keyCol}::VARCHAR AS "right_key"
+FROM ${leftTbl} L
+JOIN ${rightTbl} R
+  ON ${blockL} = ${blockR}
+ AND jaro_winkler_similarity(${normL}, ${normR}) >= ${lit(minSim)}${tolClause}
+QUALIFY row_number() OVER (PARTITION BY L."__rid" ORDER BY ${simExpr} DESC, R."__rid" ASC) = 1
+ORDER BY "__similarity" ASC, L."__rid" ASC
+LIMIT ${Math.max(1, opts.limit ?? 500)};`;
+}
+
+export type PivotAggFn = 'SUM' | 'COUNT' | 'AVG' | 'MIN' | 'MAX' | 'FIRST';
+
+export interface PivotOptions {
+  sourceAlias: string;
+  targetAlias: string;
+  indexColumns: readonly string[];
+  pivotColumn: string;
+  valueColumn: string;
+  aggFn: PivotAggFn;
+}
+
+export interface UnpivotOptions {
+  sourceAlias: string;
+  targetAlias: string;
+  unpivotColumns: readonly string[];
+  nameColumn: string;
+  valueColumn: string;
+}
+
+/** Check distinct value count of the pivot column to enforce the column-cardinality cap. */
+export function buildPivotCardinalitySql(tableAlias: string, pivotColumn: string): string {
+  return `SELECT count(DISTINCT ${ident(pivotColumn)})::INTEGER AS "distinct_count" FROM ${ident(tableAlias)};`;
+}
+
+/** Compile a deterministic DuckDB PIVOT step with fresh sequential __rid values. */
+export function buildPivotSql(opts: PivotOptions): string {
+  const aggMap: Record<PivotAggFn, string> = {
+    SUM: 'sum',
+    COUNT: 'count',
+    AVG: 'avg',
+    MIN: 'min',
+    MAX: 'max',
+    FIRST: 'first',
+  };
+  const fn = aggMap[opts.aggFn];
+  const groupClause =
+    opts.indexColumns.length > 0
+      ? `\n  GROUP BY ${opts.indexColumns.map((c) => ident(c)).join(', ')}`
+      : '';
+
+  return `CREATE OR REPLACE TABLE ${ident(opts.targetAlias)} AS
+SELECT row_number() OVER () AS "__rid", *
+FROM (
+  PIVOT (SELECT * EXCLUDE ("__rid") FROM ${ident(opts.sourceAlias)})
+  ON ${ident(opts.pivotColumn)}
+  USING ${fn}(${ident(opts.valueColumn)})${groupClause}
+);`;
+}
+
+/** Compile a deterministic DuckDB UNPIVOT step with fresh sequential __rid values. */
+export function buildUnpivotSql(opts: UnpivotOptions): string {
+  if (opts.unpivotColumns.length === 0) {
+    throw new Error('Select at least one column to unpivot.');
+  }
+  const nameCol = opts.nameColumn.trim() || 'attribute';
+  const valCol = opts.valueColumn.trim() || 'value';
+
+  return `CREATE OR REPLACE TABLE ${ident(opts.targetAlias)} AS
+SELECT row_number() OVER () AS "__rid", *
+FROM (
+  UNPIVOT (SELECT * EXCLUDE ("__rid") FROM ${ident(opts.sourceAlias)})
+  ON ${opts.unpivotColumns.map((c) => ident(c)).join(', ')}
+  INTO
+    NAME ${ident(nameCol)}
+    VALUE ${ident(valCol)}
+);`;
+}
+
+/** Build DuckDB ATTACH SQL for .duckdb or .sqlite/.db files. */
+export function buildAttachSql(
+  virtualName: string,
+  attachAlias: string,
+  kind: 'duckdb' | 'sqlite',
+  readOnly = true,
+): string {
+  const opts: string[] = [];
+  if (kind === 'sqlite') opts.push('TYPE SQLITE');
+  if (readOnly) opts.push('READ_ONLY');
+  const suffix = opts.length > 0 ? ` (${opts.join(', ')})` : '';
+  return `ATTACH ${lit(virtualName)} AS ${ident(attachAlias)}${suffix};`;
+}
+
+/** Build DuckDB DETACH SQL. */
+export function buildDetachSql(attachAlias: string): string {
+  return `DETACH ${ident(attachAlias)};`;
+}
+
+/** List user tables in an attached catalog. */
+export function buildListAttachedTablesSql(attachAlias: string): string {
+  return `SELECT table_name::VARCHAR AS "table_name"
+FROM information_schema.tables
+WHERE table_catalog = ${lit(attachAlias)}
+  AND table_schema = 'main'
+ORDER BY table_name ASC;`;
+}
+
+/** Copy a table from an attached database into local memory with sequential __rid. */
+export function buildImportAttachedTableSql(
+  attachAlias: string,
+  remoteTableName: string,
+  localTableName: string,
+  hasRid: boolean,
+): string {
+  const selectExpr = hasRid ? 'SELECT * EXCLUDE ("__rid")' : 'SELECT *';
+  return `CREATE OR REPLACE TABLE ${ident(localTableName)} AS
+SELECT row_number() OVER () AS "__rid", *
+FROM (${selectExpr} FROM ${ident(attachAlias)}.${ident(remoteTableName)});`;
+}
+
+/** Write a local table into an attached .duckdb database for copyFileToBuffer export. */
+export function buildExportAttachedTableSql(
+  attachAlias: string,
+  sourceAlias: string,
+  exportName: string,
+): string {
+  return `CREATE OR REPLACE TABLE ${ident(attachAlias)}.${ident(exportName)} AS
+SELECT * EXCLUDE ("__rid")
+FROM ${ident(sourceAlias)};`;
+}
+
+/** Query distinct original -> SHA-256 token pairs for reversible tokenization key maps. */
+export function buildTokenizationKeyMapSql(
+  sourceAlias: string,
+  columns: readonly string[],
+  salt: string,
+  limitPerCol = 50000,
+): string {
+  if (columns.length === 0) {
+    throw new Error('Select at least one tokenized column to export a key map.');
+  }
+  const branches = columns.map(
+    (col) => `(
+  SELECT
+    ${lit(col)} AS "column_name",
+    ${ident(col)}::VARCHAR AS "original_value",
+    sha256(${lit(`${salt}|`)} || ${ident(col)}::VARCHAR) AS "token"
+  FROM ${ident(sourceAlias)}
+  WHERE ${ident(col)} IS NOT NULL
+  GROUP BY ${ident(col)}::VARCHAR
+  ORDER BY "original_value" ASC
+  LIMIT ${Math.max(1, limitPerCol)}
+)`,
+  );
+  return `${branches.join('\nUNION ALL\n')};`;
 }

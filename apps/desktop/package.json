@@ -1,0 +1,12 @@
+{
+  "name": "@dewpond/desktop",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Optional signed offline Tauri v2 desktop wrapper for Dewpond",
+  "scripts": {
+    "dev": "tauri dev",
+    "build": "pnpm --filter @dewpond/web build && tauri build",
+    "tauri": "tauri",
+    "typecheck": "node -e \"console.log('@dewpond/desktop: no TypeScript sources to check')\""
+  }
+}

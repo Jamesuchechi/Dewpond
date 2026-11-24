@@ -1,6 +1,9 @@
 export type {
+  CellEditEntry,
+  EditOverlay,
   Expr,
   IngestOptions,
+  InsertedRowEntry,
   JoinHow,
   JoinKey,
   LogicalType,

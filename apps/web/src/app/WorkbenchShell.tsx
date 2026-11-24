@@ -21,6 +21,7 @@ import {
   findShareUnsafeLiterals,
   remapRecipeColumns,
   validateRecipeJson,
+  type EditOverlay,
   type LogicalType,
   type Recipe,
   type Step,
@@ -41,8 +42,15 @@ import {
   buildJsonExportBytes,
   buildNdjsonExportBytes,
   buildParquetExportBytes,
+  buildSelfContainedHtmlReport,
+  buildTokenizationKeyMapJson,
   buildXlsxExportBytes,
 } from './exporters';
+import {
+  buildSchemaOnlyNlPayload,
+  compileLocalNlToSql,
+  extractSqlFromLlmResponse,
+} from './nlToSql';
 import {
   detectOpfsCapability,
   loadOpfsSnapshot,
@@ -57,20 +65,35 @@ import { ProfileSparkline } from './ProfileSparkline';
 import { buildSyntheticMessyPayrollCsv } from './sampleDataset';
 import {
   buildArrowTableTypedCastSql,
+  buildAttachSql,
   buildCompareDiffSql,
   buildCompareSummarySql,
   buildCsvRejectCountSql,
   buildCsvTypedIngestSql,
+  buildDetachSql,
+  buildFuzzyDedupeCandidatesSql,
+  buildFuzzyDedupeCommitSql,
+  buildFuzzyReconcileSql,
+  buildImportAttachedTableSql,
   buildKAnonymityQuery,
+  buildKeysetPageSql,
   buildKeyUniquenessCheckSql,
   buildLazyFileIngestSql,
+  buildListAttachedTablesSql,
+  buildPivotCardinalitySql,
+  buildPivotSql,
   buildPopulateRejectsSql,
+  buildTokenizationKeyMapSql,
+  buildUnpivotSql,
+  compileCellRowOverlaySql,
   compileCleanStepSql,
   compileFullRecipeSql,
   compileLowercaseColumnSql,
   compileRedactViewSql,
   computeSchemaDiff,
   sanitizeTableName,
+  type BlockingMode,
+  type PivotAggFn,
   type RedactColumnPlan,
 } from './sqlCompiler';
 import { SqlEditor } from './SqlEditor';
@@ -157,6 +180,7 @@ interface StagedXlsxReview {
 type StagedReview = StagedCsvReview | StagedXlsxReview;
 type CleanOp =
   | 'dedupe'
+  | 'fuzzyDedupe'
   | 'trim'
   | 'case'
   | 'filter'
@@ -171,7 +195,9 @@ type CleanOp =
   | 'merge'
   | 'fillNulls'
   | 'parseDate'
-  | 'parseNumber';
+  | 'parseNumber'
+  | 'pivot'
+  | 'unpivot';
 
 interface ProfileSummaryState {
   tableAlias: string;
@@ -274,6 +300,9 @@ export function WorkbenchShell() {
   const recipeImportInputRef = useRef<HTMLInputElement | null>(null);
   const stagedSourceRef = useRef<{ file?: File; text?: string } | null>(null);
   const pageCacheRef = useRef<Map<string, QueryTableResult>>(new Map());
+  const pageCursorsRef = useRef<
+    Map<string, { firstOrd: number; firstRid: string; lastOrd: number; lastRid: string }>
+  >(new Map());
 
   const {
     engineStatus,
@@ -404,6 +433,14 @@ export function WorkbenchShell() {
   const [cleanDateFmt, setCleanDateFmt] = useState<'DMY' | 'MDY' | 'ISO'>('DMY');
   const [cleanNumLocale, setCleanNumLocale] = useState<'us_currency' | 'eu_decimal'>('us_currency');
   const [cleanReorderCsv, setCleanReorderCsv] = useState<string>('');
+  const [pivotIndexCols, setPivotIndexCols] = useState<string[]>([]);
+  const [pivotOnCol, setPivotOnCol] = useState<string>('');
+  const [pivotValueCol, setPivotValueCol] = useState<string>('');
+  const [pivotAgg, setPivotAgg] = useState<PivotAggFn>('SUM');
+  const [pivotMaxCols, setPivotMaxCols] = useState<number>(40);
+  const [unpivotCols, setUnpivotCols] = useState<string[]>([]);
+  const [unpivotNameCol, setUnpivotNameCol] = useState<string>('attribute');
+  const [unpivotValueCol, setUnpivotValueCol] = useState<string>('value');
 
   // Persistence & Recipe Import state
   const [opfsCap, setOpfsCap] = useState<OpfsCapability>({ available: true });
@@ -411,9 +448,16 @@ export function WorkbenchShell() {
   const [importedRecipe, setImportedRecipe] = useState<Recipe | null>(null);
   const [driftMap, setDriftMap] = useState<Record<string, string>>({});
   const [shareLinkCopied, setShareLinkCopied] = useState(false);
+  const [editOverlay, setEditOverlay] = useState<EditOverlay | null>(null);
 
   // SQL Guard override state
   const [allowTrustedDdl, setAllowTrustedDdl] = useState(false);
+
+  // Local-first Schema-Only NL->SQL state
+  const [nlPrompt, setNlPrompt] = useState('total amount by department');
+  const [nlMode, setNlMode] = useState<'local' | 'byo'>('local');
+  const [nlExternalResponse, setNlExternalResponse] = useState('');
+  const [nlPayloadApproved, setNlPayloadApproved] = useState(false);
 
   // Redact state
   const [piiFindings, setPiiFindings] = useState<PiiFinding[]>([]);
@@ -442,6 +486,22 @@ export function WorkbenchShell() {
     rightDuplicates: number;
   } | null>(null);
   const [compareLastResult, setCompareLastResult] = useState<QueryTableResult | null>(null);
+  const [compareMode, setCompareMode] = useState<'exact' | 'fuzzy'>('exact');
+  const [fuzzyBlockMode, setFuzzyBlockMode] = useState<BlockingMode>('prefix_3');
+  const [fuzzyMinSim, setFuzzyMinSim] = useState<number>(0.85);
+  const [fuzzyTolCol, setFuzzyTolCol] = useState<string>('');
+  const [fuzzyTolDelta, setFuzzyTolDelta] = useState<string>('5');
+  const [fuzzyQueue, setFuzzyQueue] = useState<
+    Array<{
+      keepRid: string;
+      dropRid: string;
+      leftValue: string;
+      rightValue: string;
+      similarity: string;
+      editDist: string;
+    }>
+  >([]);
+  const [fuzzyApprovedDrops, setFuzzyApprovedDrops] = useState<string[]>([]);
 
   const activeTable: LoadedTableMeta | undefined =
     tables.find((t) => t.id === selectedTableId) ?? tables[0];
@@ -488,11 +548,18 @@ export function WorkbenchShell() {
     alias: string,
     totalRows: number,
     pageIndex = 0,
+    prevPageIndex = 0,
   ): Promise<QueryTableResult> {
     const pageSize = 500;
     const safePage = Math.max(0, pageIndex);
     const cacheKey = `${alias}:${safePage}`;
     const cached = pageCacheRef.current.get(cacheKey);
+    const activeMeta = useWorkspaceStore
+      .getState()
+      .tables.find((t) => t.alias === alias || t.baseAlias === alias);
+    const hasRid = Boolean(activeMeta?.columns.some((c) => c.name === '__rid'));
+    const hasOrd = Boolean(activeMeta?.columns.some((c) => c.name === '__ord'));
+
     if (cached) {
       setQueryResult(cached, null);
       setGridPageNav({
@@ -500,18 +567,61 @@ export function WorkbenchShell() {
         pageSize,
         totalRows,
         cacheHit: true,
+        keyset: hasRid,
         onChangePage: (next) => {
-          void previewAliasInGrid(client, alias, totalRows, next);
+          void previewAliasInGrid(client, alias, totalRows, next, safePage);
         },
       });
       return cached;
     }
 
-    const offset = safePage * pageSize;
-    const res = await client.queryRows(
-      `SELECT * FROM ${ident(alias)} LIMIT ${pageSize} OFFSET ${offset};`,
-      pageSize,
-    );
+    let sql: string;
+    const prevCursor = pageCursorsRef.current.get(`${alias}:${prevPageIndex}`);
+    if (hasRid && safePage === 0) {
+      sql = buildKeysetPageSql({ alias, pageSize, hasRid, hasOrd, direction: 'first' });
+    } else if (hasRid && safePage === prevPageIndex + 1 && prevCursor) {
+      sql = buildKeysetPageSql({
+        alias,
+        pageSize,
+        hasRid,
+        hasOrd,
+        direction: 'next',
+        cursorOrd: prevCursor.lastOrd,
+        cursorRid: prevCursor.lastRid,
+      });
+    } else if (hasRid && safePage === prevPageIndex - 1 && prevCursor) {
+      sql = buildKeysetPageSql({
+        alias,
+        pageSize,
+        hasRid,
+        hasOrd,
+        direction: 'prev',
+        cursorOrd: prevCursor.firstOrd,
+        cursorRid: prevCursor.firstRid,
+      });
+    } else {
+      sql = buildKeysetPageSql({
+        alias,
+        pageSize,
+        hasRid: false,
+        hasOrd: false,
+        fallbackOffset: safePage * pageSize,
+      });
+    }
+
+    const res = await client.queryRows(sql, pageSize);
+    const ridIdx = res.columns.findIndex((c) => c.name === '__rid');
+    const ordIdx = res.columns.findIndex((c) => c.name === '__ord');
+    if (ridIdx >= 0 && res.rows.length > 0) {
+      const firstRow = res.rows[0]!;
+      const lastRow = res.rows[res.rows.length - 1]!;
+      const firstRid = String(firstRow[ridIdx] ?? '0');
+      const lastRid = String(lastRow[ridIdx] ?? '0');
+      const firstOrd = ordIdx >= 0 ? Number(firstRow[ordIdx]) : Number(firstRid);
+      const lastOrd = ordIdx >= 0 ? Number(lastRow[ordIdx]) : Number(lastRid);
+      pageCursorsRef.current.set(cacheKey, { firstOrd, firstRid, lastOrd, lastRid });
+    }
+
     pageCacheRef.current.set(cacheKey, res);
     setQueryResult(res, null);
     setGridPageNav({
@@ -519,8 +629,9 @@ export function WorkbenchShell() {
       pageSize,
       totalRows,
       cacheHit: false,
+      keyset: hasRid,
       onChangePage: (next) => {
-        void previewAliasInGrid(client, alias, totalRows, next);
+        void previewAliasInGrid(client, alias, totalRows, next, safePage);
       },
     });
     return res;
@@ -900,6 +1011,123 @@ export function WorkbenchShell() {
     }
 
     const virtualName = `__upload_${Date.now()}_${file.name.replace(/[^a-zA-Z0-9._-]/g, '_')}`;
+    if (
+      lower.endsWith('.duckdb') ||
+      lower.endsWith('.sqlite') ||
+      lower.endsWith('.sqlite3') ||
+      lower.endsWith('.db')
+    ) {
+      const dbKind: 'duckdb' | 'sqlite' = lower.endsWith('.duckdb') ? 'duckdb' : 'sqlite';
+      const attachAlias = `__attach_${Date.now()}`;
+      setBusy(true, `Attaching ${dbKind.toUpperCase()} database "${file.name}"…`);
+      try {
+        const client = await ensureEngineReady();
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        await client.registerFileBuffer(virtualName, bytes);
+        try {
+          await client.exec(buildAttachSql(virtualName, attachAlias, dbKind, true));
+        } catch (attachErr) {
+          const msg = attachErr instanceof Error ? attachErr.message : String(attachErr);
+          if (dbKind === 'sqlite' && /sqlite|extension|network|http/i.test(msg)) {
+            throw new Error(
+              `SQLite ATTACH requires the self-hosted sqlite_scanner extension in /duckdb/extensions/ (zero-network CSP blocks remote downloads). (${msg})`,
+              { cause: attachErr },
+            );
+          }
+          throw attachErr;
+        }
+        try {
+          const listRes = await client.queryRows(buildListAttachedTablesSql(attachAlias), 200);
+          const remoteTables = listRes.rows.map((r) => String(r[0] ?? '')).filter(Boolean);
+          if (remoteTables.length === 0) {
+            setStatusNote(`Attached "${file.name}", but found 0 tables in schema "main".`);
+            return;
+          }
+          let firstPreview: QueryTableResult | null = null;
+          let firstMeta: LoadedTableMeta | null = null;
+          for (const remoteName of remoteTables) {
+            const descRes = await client.queryRows(
+              `DESCRIBE ${ident(attachAlias)}.${ident(remoteName)};`,
+              500,
+            );
+            const hasRid = descRes.rows.some((r) => String(r[0] ?? '') === '__rid');
+            const localName = sanitizeTableName(
+              remoteTables.length === 1
+                ? file.name.replace(/\.(duckdb|sqlite3?|db)$/i, '')
+                : `${file.name.replace(/\.(duckdb|sqlite3?|db)$/i, '')}_${remoteName}`,
+            );
+            const importSql = buildImportAttachedTableSql(
+              attachAlias,
+              remoteName,
+              localName,
+              hasRid,
+            );
+            await client.exec(importSql);
+            const countRes = await client.queryRows(
+              `SELECT count(*)::BIGINT AS total_rows FROM ${ident(localName)};`,
+              1,
+            );
+            const rowCount = Number(countRes.rows[0]?.[0] ?? 0);
+            const preview = await client.queryRows(
+              `SELECT * FROM ${ident(localName)} LIMIT 500;`,
+              500,
+            );
+            const loaded: LoadedTableMeta = {
+              id: localName,
+              displayName: `${file.name} › ${remoteName}`,
+              baseAlias: localName,
+              alias: localName,
+              sourceKind: dbKind,
+              bytes: file.size,
+              rowCount,
+              rejectCount: 0,
+              columns: preview.columns,
+            };
+            registerLoadedTable(loaded, {
+              virtualName,
+              file,
+              ingestSql: importSql,
+            });
+            pageCacheRef.current.set(`${localName}:0`, preview);
+            if (!firstPreview) {
+              firstPreview = preview;
+              firstMeta = loaded;
+            }
+          }
+          if (firstPreview && firstMeta) {
+            const meta = firstMeta;
+            setQueryResult(firstPreview, null);
+            setGridPageNav({
+              pageIndex: 0,
+              pageSize: 500,
+              totalRows: meta.rowCount,
+              cacheHit: false,
+              onChangePage: (next) => {
+                void previewAliasInGrid(client, meta.alias, meta.rowCount, next);
+              },
+            });
+            applyLoadedSelectionDefaults(meta);
+            navigateFeature('data');
+            setStatusNote(
+              `Attached ${file.name} (${dbKind.toUpperCase()}): imported ${remoteTables.length} table(s).`,
+            );
+          }
+          setIngestModalOpen(false);
+          await refreshMemoryGauge();
+        } finally {
+          await client.exec(buildDetachSql(attachAlias)).catch(() => undefined);
+          await client.dropVirtualFile(virtualName);
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        setQueryResult(null, msg);
+        setStatusNote(`${dbKind.toUpperCase()} ATTACH failed: ${msg}`);
+      } finally {
+        setBusy(false);
+      }
+      return;
+    }
+
     if (lower.endsWith('.csv') || lower.endsWith('.tsv') || lower.endsWith('.txt')) {
       await stageCsvTextOrFile({
         displayName: file.name,
@@ -1325,6 +1553,12 @@ export function WorkbenchShell() {
             locale: cleanNumLocale,
           },
         };
+      case 'fuzzyDedupe':
+        return { error: 'Use "Find Fuzzy Candidates" and the Review Queue below.' };
+      case 'pivot':
+        return { error: 'Configure Pivot options and click "Apply Pivot" below.' };
+      case 'unpivot':
+        return { error: 'Select columns to unpivot and click "Apply Unpivot" below.' };
     }
   }
 
@@ -1596,12 +1830,20 @@ export function WorkbenchShell() {
   }
 
   async function handleExportData(
-    format: 'csv' | 'json' | 'ndjson' | 'parquet' | 'xlsx',
+    format: 'csv' | 'json' | 'ndjson' | 'parquet' | 'xlsx' | 'duckdb',
   ): Promise<void> {
     if (!activeTable) return;
     setBusy(true, `Exporting "${activeTable.alias}" as ${format.toUpperCase()}…`);
     try {
       const client = await ensureEngineReady();
+      if (format === 'duckdb') {
+        const bytes = await client.exportDuckdbFile([
+          { alias: activeTable.alias, exportName: activeTable.baseAlias },
+        ]);
+        triggerBlobDownload(`${activeTable.baseAlias}.duckdb`, bytes, 'application/octet-stream');
+        setStatusNote(`Exported ${activeTable.alias} as DUCKDB (${formatBytes(bytes.length)}).`);
+        return;
+      }
       const res = await client.queryRows(
         `SELECT * EXCLUDE ("__rid") FROM ${ident(activeTable.alias)} LIMIT 250000;`,
         250000,
@@ -1634,6 +1876,90 @@ export function WorkbenchShell() {
       const msg = err instanceof Error ? err.message : String(err);
       setQueryResult(null, msg);
       setStatusNote(`Export failed: ${msg}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleExportHtmlReport(): Promise<void> {
+    if (!activeTable) return;
+    setBusy(true, `Building self-contained HTML report for "${activeTable.alias}"…`);
+    try {
+      const client = await ensureEngineReady();
+      const res = await client.queryRows(
+        `SELECT * EXCLUDE ("__rid") FROM ${ident(activeTable.alias)} LIMIT 50;`,
+        50,
+      );
+      const htmlBytes = buildSelfContainedHtmlReport({
+        datasetName: activeTable.displayName,
+        activeAlias: activeTable.alias,
+        rowCount: activeTable.rowCount,
+        columns: res.columns,
+        previewRows: res.rows,
+        steps: stepSnapshots.slice(0, recipe.head).map((s) => ({
+          stepId: s.stepId,
+          label: s.label,
+          sql: s.sql,
+        })),
+        issues:
+          profileState?.tableAlias === activeTable.alias
+            ? profileState.issues.map((i) => ({
+                columnName: i.columnName,
+                severity: i.severity,
+                message: i.message,
+              }))
+            : [],
+        redactModes: redactPlans,
+      });
+      triggerBlobDownload(
+        `${activeTable.baseAlias}_report.html`,
+        htmlBytes,
+        'text/html;charset=utf-8',
+      );
+      setStatusNote(`Exported self-contained HTML report (${formatBytes(htmlBytes.length)}).`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setQueryResult(null, msg);
+      setStatusNote(`HTML report export failed: ${msg}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleExportTokenKeyMap(format: 'json' | 'csv'): Promise<void> {
+    if (!activeTable) return;
+    const tokenizedCols = Object.entries(redactPlans)
+      .filter(([, mode]) => mode === 'hash_sha256')
+      .map(([col]) => col);
+    if (tokenizedCols.length === 0) {
+      setStatusNote(
+        'Mark at least one column as "Hash (SHA-256 + salt)" in Redact first to export a reversible key map.',
+      );
+      return;
+    }
+    setBusy(true, `Generating reversible key map for ${tokenizedCols.length} column(s)…`);
+    try {
+      const client = await ensureEngineReady();
+      const sql = buildTokenizationKeyMapSql(activeTable.baseAlias, tokenizedCols, redactSalt);
+      const res = await client.queryRows(sql, 200000);
+      if (format === 'json') {
+        const entries = res.rows.map((r) => ({
+          column: String(r[0] ?? ''),
+          original: String(r[1] ?? ''),
+          token: String(r[2] ?? ''),
+        }));
+        const bytes = buildTokenizationKeyMapJson(activeTable.baseAlias, entries);
+        triggerBlobDownload(`${activeTable.baseAlias}.keymap.json`, bytes, 'application/json');
+        setStatusNote(`Exported reversible key map JSON (${entries.length} entries).`);
+      } else {
+        const bytes = buildCsvExportBytes(res.columns, res.rows, neutralizeFormulas);
+        triggerBlobDownload(`${activeTable.baseAlias}.keymap.csv`, bytes, 'text/csv;charset=utf-8');
+        setStatusNote(`Exported reversible key map CSV (${res.rows.length} entries).`);
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setQueryResult(null, msg);
+      setStatusNote(`Key map export failed: ${msg}`);
     } finally {
       setBusy(false);
     }
@@ -1748,6 +2074,258 @@ export function WorkbenchShell() {
     }
   }
 
+  async function handleFindFuzzyCandidates(): Promise<void> {
+    if (!activeTable) return;
+    setBusy(true, 'Scanning blocking groups for fuzzy duplicates…');
+    try {
+      const client = await ensureEngineReady();
+      const tolNum = Number(fuzzyTolDelta);
+      const sql = buildFuzzyDedupeCandidatesSql({
+        tableAlias: activeTable.alias,
+        matchColumn: cleanPrimaryCol,
+        blockingMode: fuzzyBlockMode,
+        minSimilarity: fuzzyMinSim,
+        numericColumn: fuzzyTolCol || undefined,
+        numericTolerance: fuzzyTolCol && Number.isFinite(tolNum) ? tolNum : undefined,
+      });
+      const res = await client.queryRows(sql, 200);
+      const pairs = res.rows.map((r) => ({
+        keepRid: String(r[0] ?? ''),
+        dropRid: String(r[1] ?? ''),
+        leftValue: String(r[2] ?? ''),
+        rightValue: String(r[3] ?? ''),
+        similarity: String(r[4] ?? ''),
+        editDist: String(r[5] ?? ''),
+      }));
+      setFuzzyQueue(pairs);
+      setFuzzyApprovedDrops(pairs.map((p) => p.dropRid).filter(Boolean));
+      setStatusNote(`Found ${pairs.length} fuzzy duplicate candidate(s) in review queue.`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setQueryResult(null, msg);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleCommitFuzzyMerges(): Promise<void> {
+    if (!activeTable || fuzzyApprovedDrops.length === 0) return;
+    const stepIndex = recipe.head + 1;
+    const stepId = `s${stepIndex}`;
+    const targetAlias = `${activeTable.baseAlias}@${stepId}`;
+    const sql = buildFuzzyDedupeCommitSql(activeTable.alias, targetAlias, fuzzyApprovedDrops);
+
+    setBusy(true, `Committing ${fuzzyApprovedDrops.length} approved fuzzy merge(s)…`);
+    try {
+      const client = await ensureEngineReady();
+      await client.exec(sql);
+      const countRes = await client.queryRows(
+        `SELECT count(*)::BIGINT AS c FROM ${ident(targetAlias)};`,
+        1,
+      );
+      const rowCount = Number(countRes.rows[0]?.[0] ?? 0);
+      const preview = await client.queryRows(`SELECT * FROM ${ident(targetAlias)} LIMIT 500;`, 500);
+      recordExecutedStep(
+        {
+          id: stepId,
+          op: 'rawSql',
+          sql: `SELECT * FROM ${ident(activeTable.alias)} WHERE "__rid"::VARCHAR NOT IN (${fuzzyApprovedDrops.map((r) => lit(r)).join(', ')})`,
+          as: targetAlias,
+          trusted: true,
+        },
+        {
+          stepId,
+          label: `Fuzzy dedupe (${fuzzyApprovedDrops.length} merged)`,
+          tableId: activeTable.id,
+          targetAlias,
+          sql,
+          rowCount,
+          columns: preview.columns,
+        },
+      );
+      pageCacheRef.current.set(`${targetAlias}:0`, preview);
+      setQueryResult(preview, null);
+      setFuzzyQueue([]);
+      setFuzzyApprovedDrops([]);
+      setStatusNote(`Committed fuzzy dedupe → ${rowCount.toLocaleString('en-US')} rows.`);
+      await refreshMemoryGauge();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setQueryResult(null, msg);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleApplyPivot(): Promise<void> {
+    if (!activeTable) return;
+    const onCol = pivotOnCol || userColumns[0]?.name || '';
+    const valCol = pivotValueCol || userColumns[0]?.name || '';
+    if (!onCol || !valCol) {
+      setQueryResult(null, 'Select both a Pivot Column (ON) and a Value Column (USING).');
+      return;
+    }
+    const cap = Math.max(2, Math.min(200, Math.round(pivotMaxCols || 40)));
+    setBusy(true, `Checking cardinality on "${onCol}" (cap: ${cap})…`);
+    try {
+      const client = await ensureEngineReady();
+      const cardRes = await client.queryRows(buildPivotCardinalitySql(activeTable.alias, onCol), 1);
+      const distinctCount = Number(cardRes.rows[0]?.[0] ?? 0);
+      if (distinctCount <= 0) {
+        setQueryResult(null, `Pivot column "${onCol}" has no distinct values.`);
+        return;
+      }
+      if (distinctCount > cap) {
+        setQueryResult(
+          null,
+          `Column-cardinality cap exceeded: "${onCol}" has ${distinctCount} distinct values (cap: ${cap}). Increase the cap or filter rows first.`,
+        );
+        return;
+      }
+      const stepIndex = recipe.head + 1;
+      const stepId = `s${stepIndex}`;
+      const targetAlias = `${activeTable.baseAlias}@${stepId}`;
+      const sql = buildPivotSql({
+        sourceAlias: activeTable.alias,
+        targetAlias,
+        indexColumns: pivotIndexCols,
+        pivotColumn: onCol,
+        valueColumn: valCol,
+        aggFn: pivotAgg,
+      });
+      await client.exec(sql);
+      const countRes = await client.queryRows(
+        `SELECT count(*)::BIGINT AS c FROM ${ident(targetAlias)};`,
+        1,
+      );
+      const rowCount = Number(countRes.rows[0]?.[0] ?? 0);
+      const preview = await client.queryRows(`SELECT * FROM ${ident(targetAlias)} LIMIT 500;`, 500);
+      recordExecutedStep(
+        {
+          id: stepId,
+          op: 'rawSql',
+          sql: `SELECT * FROM ${ident(targetAlias)}`,
+          as: targetAlias,
+          trusted: true,
+        },
+        {
+          stepId,
+          label: `Pivot ${onCol} (${pivotAgg}(${valCol}))`,
+          tableId: activeTable.id,
+          targetAlias,
+          sql,
+          rowCount,
+          columns: preview.columns,
+        },
+      );
+      pageCacheRef.current.set(`${targetAlias}:0`, preview);
+      setQueryResult(preview, null);
+      setStatusNote(
+        `Pivoted "${onCol}" (${distinctCount} cols, cap ${cap}) → ${rowCount.toLocaleString('en-US')} rows.`,
+      );
+      await refreshMemoryGauge();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setQueryResult(null, msg);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleApplyUnpivot(): Promise<void> {
+    if (!activeTable) return;
+    if (unpivotCols.length === 0) {
+      setQueryResult(null, 'Select at least one column to unpivot.');
+      return;
+    }
+    const stepIndex = recipe.head + 1;
+    const stepId = `s${stepIndex}`;
+    const targetAlias = `${activeTable.baseAlias}@${stepId}`;
+    setBusy(true, `Unpivoting ${unpivotCols.length} column(s)…`);
+    try {
+      const client = await ensureEngineReady();
+      const sql = buildUnpivotSql({
+        sourceAlias: activeTable.alias,
+        targetAlias,
+        unpivotColumns: unpivotCols,
+        nameColumn: unpivotNameCol,
+        valueColumn: unpivotValueCol,
+      });
+      await client.exec(sql);
+      const countRes = await client.queryRows(
+        `SELECT count(*)::BIGINT AS c FROM ${ident(targetAlias)};`,
+        1,
+      );
+      const rowCount = Number(countRes.rows[0]?.[0] ?? 0);
+      const preview = await client.queryRows(`SELECT * FROM ${ident(targetAlias)} LIMIT 500;`, 500);
+      recordExecutedStep(
+        {
+          id: stepId,
+          op: 'rawSql',
+          sql: `SELECT * FROM ${ident(targetAlias)}`,
+          as: targetAlias,
+          trusted: true,
+        },
+        {
+          stepId,
+          label: `Unpivot (${unpivotCols.length} cols → ${unpivotNameCol.trim() || 'attribute'})`,
+          tableId: activeTable.id,
+          targetAlias,
+          sql,
+          rowCount,
+          columns: preview.columns,
+        },
+      );
+      pageCacheRef.current.set(`${targetAlias}:0`, preview);
+      setQueryResult(preview, null);
+      setStatusNote(
+        `Unpivoted ${unpivotCols.length} column(s) → ${rowCount.toLocaleString('en-US')} rows.`,
+      );
+      await refreshMemoryGauge();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setQueryResult(null, msg);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleRunFuzzyReconcile(): Promise<void> {
+    if (!resolvedLeftAlias || !resolvedRightAlias) return;
+    const keyCol = compareKeys[0] ?? compareSchemaDiff.shared[0];
+    if (!keyCol) {
+      setStatusNote('Select a shared key column for Fuzzy Reconcile.');
+      return;
+    }
+    setBusy(true, `Fuzzy reconciling ${resolvedLeftAlias} vs ${resolvedRightAlias}…`);
+    try {
+      const client = await ensureEngineReady();
+      const tolNum = Number(fuzzyTolDelta);
+      const sql = buildFuzzyReconcileSql({
+        leftAlias: resolvedLeftAlias,
+        rightAlias: resolvedRightAlias,
+        keyColumn: keyCol,
+        blockingMode: fuzzyBlockMode,
+        minSimilarity: fuzzyMinSim,
+        numericColumn: fuzzyTolCol || undefined,
+        numericTolerance: fuzzyTolCol && Number.isFinite(tolNum) ? tolNum : undefined,
+      });
+      const res = await client.queryRows(sql, 500);
+      setCompareLastResult(res);
+      setGridPageNav(null);
+      setQueryResult(res, null);
+      setStatusNote(
+        `Fuzzy Reconcile returned ${res.rows.length} candidate match(es) using ${fuzzyBlockMode} blocking.`,
+      );
+      await refreshMemoryGauge();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setQueryResult(null, msg);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   function handleExportDiff(format: 'csv' | 'xlsx'): void {
     if (!compareLastResult) return;
     const bytes =
@@ -1844,6 +2422,7 @@ export function WorkbenchShell() {
     resetWorkspace();
     stagedSourceRef.current = null;
     setStagedReview(null);
+    setEditOverlay(null);
     setImportedRecipe(null);
     setSavedSnapshot(null);
     setProfileState(null);
@@ -1855,8 +2434,126 @@ export function WorkbenchShell() {
     );
   }
 
+  async function applyOverlayMutation(nextOverlay: EditOverlay): Promise<void> {
+    if (!activeTable) return;
+    setBusy(true, 'Applying local cell/row overlay…');
+    try {
+      const client = await ensureEngineReady();
+      const sourceAlias = activeTable.alias.endsWith('@edits')
+        ? activeTable.baseAlias
+        : activeTable.alias;
+      const targetAlias = `${activeTable.baseAlias}@edits`;
+      const sql = compileCellRowOverlaySql(
+        sourceAlias,
+        targetAlias,
+        activeTable.columns,
+        nextOverlay,
+      );
+      await client.exec(sql);
+      const countRes = await client.queryRows(
+        `SELECT count(*)::BIGINT AS c FROM ${ident(targetAlias)};`,
+        1,
+      );
+      const rowCount = Number(countRes.rows[0]?.[0] ?? 0);
+      const preview = await client.queryRows(
+        `SELECT * FROM ${ident(targetAlias)} ORDER BY "__ord" ASC, "__rid" ASC LIMIT 500;`,
+        500,
+      );
+      setEditOverlay(nextOverlay);
+      pageCacheRef.current.clear();
+      pageCursorsRef.current.clear();
+      pageCacheRef.current.set(`${targetAlias}:0`, preview);
+      setQueryResult(preview, null);
+      setGridPageNav({
+        pageIndex: 0,
+        pageSize: 500,
+        totalRows: rowCount,
+        cacheHit: false,
+        keyset: true,
+        onChangePage: (next) => {
+          void previewAliasInGrid(client, targetAlias, rowCount, next, 0);
+        },
+      });
+      setStatusNote(
+        `Overlay applied (${nextOverlay.cellEdits.length} edit(s), ${nextOverlay.insertedRows.length} insert(s), ${nextOverlay.deletedRids.length} delete(s)) — excluded from #r= share links.`,
+      );
+      await refreshMemoryGauge();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setQueryResult(null, msg);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function handleEditCell(rid: string, column: string, nextValue: string | null): void {
+    if (!activeTable) return;
+    const base: EditOverlay = editOverlay ?? {
+      tableId: activeTable.id,
+      cellEdits: [],
+      deletedRids: [],
+      insertedRows: [],
+    };
+    const filteredEdits = base.cellEdits.filter((e) => !(e.rid === rid && e.column === column));
+    const insertedIdx = base.insertedRows.findIndex((r) => r.rid === rid);
+    if (insertedIdx >= 0) {
+      const updatedInserts = base.insertedRows.map((r, i) =>
+        i === insertedIdx ? { ...r, values: { ...r.values, [column]: nextValue } } : r,
+      );
+      void applyOverlayMutation({ ...base, insertedRows: updatedInserts });
+      return;
+    }
+    void applyOverlayMutation({
+      ...base,
+      cellEdits: [...filteredEdits, { rid, column, value: nextValue }],
+    });
+  }
+
+  function handleInsertRowAfter(afterOrd: number): void {
+    if (!activeTable) return;
+    const base: EditOverlay = editOverlay ?? {
+      tableId: activeTable.id,
+      cellEdits: [],
+      deletedRids: [],
+      insertedRows: [],
+    };
+    const nextOrd = afterOrd + 0.5;
+    const newRid = String(1_000_000 + base.insertedRows.length + 1);
+    const values: Record<string, string | null> = {};
+    for (const col of userColumns) {
+      values[col.name] = null;
+    }
+    void applyOverlayMutation({
+      ...base,
+      insertedRows: [...base.insertedRows, { rid: newRid, ord: nextOrd, values }],
+    });
+  }
+
+  function handleDeleteRow(rid: string): void {
+    if (!activeTable) return;
+    const base: EditOverlay = editOverlay ?? {
+      tableId: activeTable.id,
+      cellEdits: [],
+      deletedRids: [],
+      insertedRows: [],
+    };
+    const isInserted = base.insertedRows.some((r) => r.rid === rid);
+    if (isInserted) {
+      void applyOverlayMutation({
+        ...base,
+        insertedRows: base.insertedRows.filter((r) => r.rid !== rid),
+      });
+      return;
+    }
+    if (base.deletedRids.includes(rid)) return;
+    void applyOverlayMutation({
+      ...base,
+      deletedRids: [...base.deletedRids, rid],
+    });
+  }
+
   async function handleCopyShareLink(): Promise<void> {
-    const token = encodeShareRecipe(recipe);
+    const token = encodeShareRecipe({ ...recipe, overlay: editOverlay ?? undefined });
     const shareUrl = `${window.location.origin}${window.location.pathname}${token}`;
     try {
       await navigator.clipboard.writeText(shareUrl);
@@ -1996,7 +2693,7 @@ export function WorkbenchShell() {
       <input
         ref={fileInputRef}
         type="file"
-        accept=".csv,.tsv,.txt,.xlsx,.xlsm,.parquet,.json,.ndjson"
+        accept=".csv,.tsv,.txt,.xlsx,.xlsm,.parquet,.json,.ndjson,.duckdb,.sqlite,.sqlite3,.db"
         className="wb-sr-only"
         onChange={handleFileInputChange}
       />
@@ -2141,56 +2838,82 @@ export function WorkbenchShell() {
         {/* Center Analytical Canvas */}
         <main className="wb-center">
           {activeFeature === 'data' && tables.length === 0 ? (
-            <section
-              className="wb-stage-card wb-welcome-card"
-              aria-label="Upload or stage local dataset"
-            >
-              <div className="wb-stage-header">
-                <div>
-                  <h1>Unmess &amp; Type-Guarded Ingest</h1>
+            <div className="wb-welcome-wrap">
+              <section
+                className="wb-stage-card wb-welcome-card"
+                aria-label="Upload or stage local dataset"
+              >
+                <div className="wb-welcome-head">
+                  <span className="wb-welcome-badge">
+                    <span className="wb-welcome-dot" aria-hidden="true" />
+                    Local-first · Zero server upload
+                  </span>
+                  <h1>Load a dataset to get started</h1>
                   <p>
-                    Pre-normalizes BOM, Windows-1252, mixed line endings, banners &amp; XLSX in a
-                    compute worker, then applies strict <code>^[+-]?[0-9]+$</code> integer &amp; ID
-                    veto scoring before casting.
+                    Drop messy spreadsheets or structured data. Dewpond normalizes encoding, guards
+                    leading-zero IDs, and loads everything straight into your browser.
                   </p>
                 </div>
-              </div>
 
-              <div
-                className={dragOver ? 'wb-dropzone dragover' : 'wb-dropzone'}
-                onDragOver={(e) => {
-                  e.preventDefault();
-                  setDragOver(true);
-                }}
-                onDragLeave={() => setDragOver(false)}
-                onDrop={handleDrop}
-              >
-                <IconUpload className="wb-drop-icon" />
-                <strong>Drop a CSV, TSV, XLSX (≤ 50 MB), Parquet, JSON, or NDJSON file</strong>
-                <span>
-                  50 MB+ CSV/Parquet streams lazily via <code>BROWSER_FILEREADER</code> handles;
-                  XLSX parses chunk-by-chunk via <code>fflate</code>.
-                </span>
-                <div className="wb-drop-buttons">
-                  <button
-                    type="button"
-                    className="wb-btn wb-btn-primary"
-                    disabled={isBusy}
-                    onClick={() => fileInputRef.current?.click()}
-                  >
-                    Choose File…
-                  </button>
-                  <button
-                    type="button"
-                    className="wb-btn wb-btn-outline"
-                    disabled={isBusy}
-                    onClick={() => void handleLoadMessyDemo()}
-                  >
-                    Stage Messy Fintech Demo (1,200 rows)
-                  </button>
+                <div
+                  className={dragOver ? 'wb-dropzone dragover' : 'wb-dropzone'}
+                  onDragOver={(e) => {
+                    e.preventDefault();
+                    setDragOver(true);
+                  }}
+                  onDragLeave={() => setDragOver(false)}
+                  onDrop={handleDrop}
+                >
+                  <div className="wb-drop-icon-wrap" aria-hidden="true">
+                    <IconUpload className="wb-drop-icon" />
+                  </div>
+                  <strong>Drop a file here, or choose from your computer</strong>
+                  <div className="wb-format-pills" aria-label="Supported file formats">
+                    <span>CSV</span>
+                    <span>TSV</span>
+                    <span>XLSX ≤ 50 MB</span>
+                    <span>Parquet</span>
+                    <span>JSON</span>
+                    <span>NDJSON</span>
+                    <span>.duckdb</span>
+                    <span>.sqlite</span>
+                  </div>
+                  <div className="wb-drop-buttons">
+                    <button
+                      type="button"
+                      className="wb-btn wb-btn-primary"
+                      disabled={isBusy}
+                      onClick={() => fileInputRef.current?.click()}
+                    >
+                      Choose File…
+                    </button>
+                    <button
+                      type="button"
+                      className="wb-btn wb-btn-outline"
+                      disabled={isBusy}
+                      onClick={() => void handleLoadMessyDemo()}
+                    >
+                      Try Messy Fintech Demo (1,200 rows)
+                    </button>
+                  </div>
                 </div>
-              </div>
-            </section>
+
+                <div className="wb-welcome-pillars">
+                  <div className="wb-pillar">
+                    <strong>Auto-Unmess</strong>
+                    <span>Strips BOM, Windows-1252 quirks, and stray banner rows.</span>
+                  </div>
+                  <div className="wb-pillar">
+                    <strong>Type-Guarded</strong>
+                    <span>Protects IDs &amp; postal codes with strict integer veto scoring.</span>
+                  </div>
+                  <div className="wb-pillar">
+                    <strong>50 MB+ Streaming</strong>
+                    <span>Large CSV &amp; Parquet files stream lazily with zero copy.</span>
+                  </div>
+                </div>
+              </section>
+            </div>
           ) : null}
 
           {activeFeature !== 'data' ? (
@@ -2344,6 +3067,7 @@ export function WorkbenchShell() {
                         {(
                           [
                             ['dedupe', 'Exact Dedupe'],
+                            ['fuzzyDedupe', 'Fuzzy Dedupe'],
                             ['trim', 'Trim Text'],
                             ['case', 'Case'],
                             ['filter', 'Filter Rows'],
@@ -2359,6 +3083,8 @@ export function WorkbenchShell() {
                             ['fillNulls', 'Fill Nulls'],
                             ['parseDate', 'Parse Date'],
                             ['parseNumber', 'Parse Number'],
+                            ['pivot', 'Pivot'],
+                            ['unpivot', 'Unpivot'],
                           ] as const
                         ).map(([op, label]) => (
                           <button
@@ -2376,7 +3102,9 @@ export function WorkbenchShell() {
                         {cleanOp !== 'trim' &&
                         cleanOp !== 'derive' &&
                         cleanOp !== 'reorder' &&
-                        cleanOp !== 'merge' ? (
+                        cleanOp !== 'merge' &&
+                        cleanOp !== 'pivot' &&
+                        cleanOp !== 'unpivot' ? (
                           <label>
                             Target / Key Column
                             <select
@@ -2689,15 +3417,268 @@ export function WorkbenchShell() {
                           </label>
                         ) : null}
 
-                        <button
-                          type="button"
-                          className="wb-btn wb-btn-primary"
-                          disabled={isBusy}
-                          onClick={() => void handleApplyCleanStep()}
-                        >
-                          Apply Clean Step
-                        </button>
+                        {cleanOp === 'fuzzyDedupe' ? (
+                          <>
+                            <label>
+                              Blocking Key
+                              <select
+                                value={fuzzyBlockMode}
+                                onChange={(e) => setFuzzyBlockMode(e.target.value as BlockingMode)}
+                              >
+                                <option value="prefix_3">First 3 chars</option>
+                                <option value="first_token">First token</option>
+                                <option value="none">No blocking (small tables)</option>
+                              </select>
+                            </label>
+                            <label>
+                              Min Similarity
+                              <input
+                                type="number"
+                                step={0.05}
+                                min={0.5}
+                                max={1}
+                                value={fuzzyMinSim}
+                                onChange={(e) => setFuzzyMinSim(Number(e.target.value) || 0.85)}
+                              />
+                            </label>
+                            <label>
+                              Numeric Tolerance Col
+                              <select
+                                value={fuzzyTolCol}
+                                onChange={(e) => setFuzzyTolCol(e.target.value)}
+                              >
+                                <option value="">None</option>
+                                {userColumns.map((c) => (
+                                  <option key={c.name} value={c.name}>
+                                    {c.name}
+                                  </option>
+                                ))}
+                              </select>
+                            </label>
+                            {fuzzyTolCol ? (
+                              <label>
+                                Max Delta (±)
+                                <input
+                                  type="number"
+                                  value={fuzzyTolDelta}
+                                  onChange={(e) => setFuzzyTolDelta(e.target.value)}
+                                />
+                              </label>
+                            ) : null}
+                            <button
+                              type="button"
+                              className="wb-btn wb-btn-outline"
+                              disabled={isBusy}
+                              onClick={() => void handleFindFuzzyCandidates()}
+                            >
+                              Find Fuzzy Candidates
+                            </button>
+                            <button
+                              type="button"
+                              className="wb-btn wb-btn-primary"
+                              disabled={fuzzyApprovedDrops.length === 0 || isBusy}
+                              onClick={() => void handleCommitFuzzyMerges()}
+                            >
+                              Commit Approved ({fuzzyApprovedDrops.length})
+                            </button>
+                          </>
+                        ) : cleanOp === 'pivot' ? (
+                          <>
+                            <label>
+                              Pivot Column (ON)
+                              <select
+                                value={pivotOnCol || userColumns[0]?.name || ''}
+                                onChange={(e) => setPivotOnCol(e.target.value)}
+                              >
+                                {userColumns.map((c) => (
+                                  <option key={c.name} value={c.name}>
+                                    {c.name}
+                                  </option>
+                                ))}
+                              </select>
+                            </label>
+                            <label>
+                              Value Column (USING)
+                              <select
+                                value={pivotValueCol || userColumns[0]?.name || ''}
+                                onChange={(e) => setPivotValueCol(e.target.value)}
+                              >
+                                {userColumns.map((c) => (
+                                  <option key={c.name} value={c.name}>
+                                    {c.name}
+                                  </option>
+                                ))}
+                              </select>
+                            </label>
+                            <label>
+                              Aggregate
+                              <select
+                                value={pivotAgg}
+                                onChange={(e) => setPivotAgg(e.target.value as PivotAggFn)}
+                              >
+                                <option value="SUM">SUM</option>
+                                <option value="COUNT">COUNT</option>
+                                <option value="AVG">AVG</option>
+                                <option value="MIN">MIN</option>
+                                <option value="MAX">MAX</option>
+                                <option value="FIRST">FIRST</option>
+                              </select>
+                            </label>
+                            <label>
+                              Cardinality Cap (Max Cols)
+                              <input
+                                type="number"
+                                min={2}
+                                max={200}
+                                value={pivotMaxCols}
+                                onChange={(e) => setPivotMaxCols(Number(e.target.value) || 40)}
+                              />
+                            </label>
+                            <div className="wb-field-group">
+                              <span>Row Index (GROUP BY)</span>
+                              <div className="wb-pill-row">
+                                {userColumns.map((c) => {
+                                  const selected = pivotIndexCols.includes(c.name);
+                                  return (
+                                    <button
+                                      key={c.name}
+                                      type="button"
+                                      className={selected ? 'wb-pill active' : 'wb-pill'}
+                                      onClick={() =>
+                                        setPivotIndexCols((prev) =>
+                                          prev.includes(c.name)
+                                            ? prev.filter((x) => x !== c.name)
+                                            : [...prev, c.name],
+                                        )
+                                      }
+                                    >
+                                      {c.name}
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                            <button
+                              type="button"
+                              className="wb-btn wb-btn-primary"
+                              disabled={isBusy}
+                              onClick={() => void handleApplyPivot()}
+                            >
+                              Apply Pivot
+                            </button>
+                          </>
+                        ) : cleanOp === 'unpivot' ? (
+                          <>
+                            <label>
+                              Name Column
+                              <input
+                                type="text"
+                                value={unpivotNameCol}
+                                onChange={(e) => setUnpivotNameCol(e.target.value)}
+                                placeholder="attribute"
+                              />
+                            </label>
+                            <label>
+                              Value Column
+                              <input
+                                type="text"
+                                value={unpivotValueCol}
+                                onChange={(e) => setUnpivotValueCol(e.target.value)}
+                                placeholder="value"
+                              />
+                            </label>
+                            <div className="wb-field-group">
+                              <span>Columns to Unpivot (ON)</span>
+                              <div className="wb-pill-row">
+                                {userColumns.map((c) => {
+                                  const selected = unpivotCols.includes(c.name);
+                                  return (
+                                    <button
+                                      key={c.name}
+                                      type="button"
+                                      className={selected ? 'wb-pill active' : 'wb-pill'}
+                                      onClick={() =>
+                                        setUnpivotCols((prev) =>
+                                          prev.includes(c.name)
+                                            ? prev.filter((x) => x !== c.name)
+                                            : [...prev, c.name],
+                                        )
+                                      }
+                                    >
+                                      {c.name}
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                            <button
+                              type="button"
+                              className="wb-btn wb-btn-primary"
+                              disabled={unpivotCols.length === 0 || isBusy}
+                              onClick={() => void handleApplyUnpivot()}
+                            >
+                              Apply Unpivot ({unpivotCols.length})
+                            </button>
+                          </>
+                        ) : (
+                          <button
+                            type="button"
+                            className="wb-btn wb-btn-primary"
+                            disabled={isBusy}
+                            onClick={() => void handleApplyCleanStep()}
+                          >
+                            Apply Clean Step
+                          </button>
+                        )}
                       </div>
+
+                      {cleanOp === 'fuzzyDedupe' && fuzzyQueue.length > 0 ? (
+                        <div className="wb-review-table-wrap">
+                          <table className="wb-mini-table">
+                            <thead>
+                              <tr>
+                                <th>Approve Drop</th>
+                                <th>Keep</th>
+                                <th>Drop Candidate</th>
+                                <th>Similarity</th>
+                                <th>Edit Dist</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {fuzzyQueue.map((item) => {
+                                const checked = fuzzyApprovedDrops.includes(item.dropRid);
+                                return (
+                                  <tr key={`${item.keepRid}-${item.dropRid}`}>
+                                    <td>
+                                      <input
+                                        type="checkbox"
+                                        checked={checked}
+                                        onChange={(e) =>
+                                          setFuzzyApprovedDrops(
+                                            e.target.checked
+                                              ? [...new Set([...fuzzyApprovedDrops, item.dropRid])]
+                                              : fuzzyApprovedDrops.filter(
+                                                  (id) => id !== item.dropRid,
+                                                ),
+                                          )
+                                        }
+                                      />
+                                    </td>
+                                    <td>
+                                      <code>#{item.keepRid}</code> {item.leftValue}
+                                    </td>
+                                    <td>
+                                      <code>#{item.dropRid}</code> {item.rightValue}
+                                    </td>
+                                    <td className="wb-mono">{item.similarity}</td>
+                                    <td className="wb-mono">{item.editDist}</td>
+                                  </tr>
+                                );
+                              })}
+                            </tbody>
+                          </table>
+                        </div>
+                      ) : null}
 
                       {candidateCleanPreview ? (
                         <div className="wb-live-sql">
@@ -2786,6 +3767,176 @@ export function WorkbenchShell() {
                     onChange={setSqlDraft}
                     onRun={() => void handleRunSql()}
                   />
+
+                  {activeTable ? (
+                    <div className="wb-nl-card">
+                      <div className="wb-nl-head">
+                        <div>
+                          <strong>Schema-Only NL&rarr;SQL Assistant</strong>
+                          <span className="wb-export-pill wb-export-pill-safe">
+                            Schema-only · 0 data rows included
+                          </span>
+                        </div>
+                        <div className="wb-pill-row">
+                          <button
+                            type="button"
+                            className={nlMode === 'local' ? 'wb-pill active' : 'wb-pill'}
+                            onClick={() => setNlMode('local')}
+                          >
+                            Local Heuristic (0 network)
+                          </button>
+                          <button
+                            type="button"
+                            className={nlMode === 'byo' ? 'wb-pill active' : 'wb-pill'}
+                            onClick={() => setNlMode('byo')}
+                          >
+                            Opt-in BYO-Key / Local LLM
+                          </button>
+                        </div>
+                      </div>
+
+                      <div className="wb-form-row">
+                        <label style={{ flex: 1 }}>
+                          Ask in Plain English
+                          <input
+                            type="text"
+                            value={nlPrompt}
+                            onChange={(e) => {
+                              setNlPrompt(e.target.value);
+                              setNlPayloadApproved(false);
+                            }}
+                            placeholder="e.g. top 10 total amount by department"
+                          />
+                        </label>
+                        {nlMode === 'local' ? (
+                          <button
+                            type="button"
+                            className="wb-btn wb-btn-primary"
+                            disabled={!nlPrompt.trim() || isBusy}
+                            onClick={() => {
+                              try {
+                                const generated = compileLocalNlToSql(
+                                  activeTable.alias,
+                                  activeTable.columns,
+                                  nlPrompt,
+                                );
+                                setSqlDraft(generated);
+                                setStatusNote(
+                                  'Generated local schema-only SQL (0 network requests).',
+                                );
+                              } catch (err) {
+                                setStatusNote(err instanceof Error ? err.message : String(err));
+                              }
+                            }}
+                          >
+                            Generate SQL (Local)
+                          </button>
+                        ) : null}
+                      </div>
+
+                      <details className="wb-nl-preview">
+                        <summary>Exact-Payload Preview (verified zero row values)</summary>
+                        <pre>
+                          {JSON.stringify(
+                            buildSchemaOnlyNlPayload(
+                              activeTable.alias,
+                              activeTable.columns,
+                              nlPrompt,
+                            ),
+                            null,
+                            2,
+                          )}
+                        </pre>
+                        <button
+                          type="button"
+                          className="wb-btn-mini"
+                          onClick={() => {
+                            const payloadJson = JSON.stringify(
+                              buildSchemaOnlyNlPayload(
+                                activeTable.alias,
+                                activeTable.columns,
+                                nlPrompt,
+                              ),
+                              null,
+                              2,
+                            );
+                            void navigator.clipboard?.writeText(payloadJson);
+                            setStatusNote('Copied exact schema-only payload to clipboard.');
+                          }}
+                        >
+                          Copy Exact Payload
+                        </button>
+                      </details>
+
+                      {nlMode === 'byo' ? (
+                        <div className="wb-nl-byo">
+                          <div className="wb-form-row">
+                            <label className="wb-check-inline">
+                              <input
+                                type="checkbox"
+                                checked={nlPayloadApproved}
+                                onChange={(e) => setNlPayloadApproved(e.target.checked)}
+                              />
+                              I reviewed the exact schema-only payload above (0 data rows)
+                            </label>
+                            <button
+                              type="button"
+                              className="wb-btn wb-btn-outline"
+                              disabled={!nlPayloadApproved}
+                              onClick={() => {
+                                const payloadJson = JSON.stringify(
+                                  buildSchemaOnlyNlPayload(
+                                    activeTable.alias,
+                                    activeTable.columns,
+                                    nlPrompt,
+                                  ),
+                                  null,
+                                  2,
+                                );
+                                void navigator.clipboard?.writeText(
+                                  `Return a single read-only DuckDB SELECT SQL query for this schema-only JSON payload:\n\n${payloadJson}`,
+                                );
+                                setStatusNote(
+                                  'Copied schema-only prompt to clipboard. Paste the model SQL response below.',
+                                );
+                              }}
+                            >
+                              Copy Schema-Only Prompt
+                            </button>
+                          </div>
+                          <div className="wb-form-row">
+                            <label style={{ flex: 1 }}>
+                              Paste External Model SQL Response (validated by @dewpond/sqlkit)
+                              <input
+                                type="text"
+                                value={nlExternalResponse}
+                                onChange={(e) => setNlExternalResponse(e.target.value)}
+                                placeholder='e.g. ```sql SELECT "department", sum("amount") FROM "..." GROUP BY 1 ```'
+                              />
+                            </label>
+                            <button
+                              type="button"
+                              className="wb-btn wb-btn-primary"
+                              disabled={!nlExternalResponse.trim() || isBusy}
+                              onClick={() => {
+                                try {
+                                  const safeSql = extractSqlFromLlmResponse(nlExternalResponse);
+                                  setSqlDraft(safeSql);
+                                  setStatusNote(
+                                    'Validated external SQL with @dewpond/sqlkit and loaded into editor.',
+                                  );
+                                } catch (err) {
+                                  setStatusNote(err instanceof Error ? err.message : String(err));
+                                }
+                              }}
+                            >
+                              Validate &amp; Load SQL
+                            </button>
+                          </div>
+                        </div>
+                      ) : null}
+                    </div>
+                  ) : null}
                 </div>
               ) : null}
 
@@ -3004,6 +4155,20 @@ export function WorkbenchShell() {
                     <div className="wb-review-actions">
                       <button
                         type="button"
+                        className={compareMode === 'exact' ? 'wb-pill active' : 'wb-pill'}
+                        onClick={() => setCompareMode('exact')}
+                      >
+                        Exact Key Diff
+                      </button>
+                      <button
+                        type="button"
+                        className={compareMode === 'fuzzy' ? 'wb-pill active' : 'wb-pill'}
+                        onClick={() => setCompareMode('fuzzy')}
+                      >
+                        Fuzzy Reconcile
+                      </button>
+                      <button
+                        type="button"
                         className="wb-btn wb-btn-outline"
                         disabled={!compareLastResult || isBusy}
                         onClick={() => handleExportDiff('csv')}
@@ -3022,9 +4187,13 @@ export function WorkbenchShell() {
                         type="button"
                         className="wb-btn wb-btn-primary"
                         disabled={compareCandidates.length === 0 || isBusy}
-                        onClick={() => void handleRunCompare()}
+                        onClick={() =>
+                          void (compareMode === 'fuzzy'
+                            ? handleRunFuzzyReconcile()
+                            : handleRunCompare())
+                        }
                       >
-                        Run Compare (Diff)
+                        {compareMode === 'fuzzy' ? 'Run Fuzzy Reconcile' : 'Run Compare (Diff)'}
                       </button>
                     </div>
                   </div>
@@ -3164,33 +4333,83 @@ export function WorkbenchShell() {
               ) : null}
 
               {activeFeature === 'export' ? (
-                <div>
+                <div className="wb-export-studio">
                   <div className="wb-stage-header">
                     <div>
                       <h1>Local Export &amp; Share-Safe Recipes</h1>
                       <p>
-                        Downloads generate local Blob URLs directly from browser memory—zero server
-                        endpoints involved.
+                        All downloads are generated locally in browser memory via Blob URLs—zero
+                        server endpoints involved.
                       </p>
+                    </div>
+                  </div>
+
+                  <div className="wb-export-summary">
+                    <div className="wb-export-stat">
+                      <span>Active Target</span>
+                      <strong>{activeTable ? activeTable.alias : 'None loaded'}</strong>
+                      <small>
+                        {activeTable
+                          ? `${activeTable.rowCount.toLocaleString('en-US')} rows · ${userColumns.length} cols`
+                          : 'Load a dataset first'}
+                      </small>
+                    </div>
+                    <div className="wb-export-stat">
+                      <span>Recipe Pipeline</span>
+                      <strong>
+                        {recipe.head} active step{recipe.head === 1 ? '' : 's'}
+                      </strong>
+                      <small>{stepSnapshots.length} total recorded</small>
+                    </div>
+                    <div className="wb-export-stat">
+                      <span>Share-Safety Audit</span>
+                      <strong>
+                        <span
+                          className={
+                            shareFindings.length === 0
+                              ? 'wb-export-pill wb-export-pill-safe'
+                              : 'wb-export-pill wb-export-pill-warn'
+                          }
+                        >
+                          {shareFindings.length === 0
+                            ? 'Share-safe (0 warnings)'
+                            : `${shareFindings.length} warning(s)`}
+                        </span>
+                      </strong>
+                      <small>No raw literals or salts leaked</small>
+                    </div>
+                    <div className="wb-export-stat">
+                      <span>Tokenized Columns</span>
+                      <strong>
+                        {Object.values(redactPlans).filter((mode) => mode === 'hash_sha256').length}{' '}
+                        SHA-256 col(s)
+                      </strong>
+                      <small>Reversible via local key map</small>
                     </div>
                   </div>
 
                   <div className="wb-export-grid">
                     <div className="wb-export-card">
-                      <strong>Cleaned Data Files</strong>
-                      <p>
-                        Active target: <code>{activeTable?.alias ?? 'none loaded'}</code>
-                      </p>
-                      <label className="wb-check-inline">
-                        <input
-                          type="checkbox"
-                          checked={neutralizeFormulas}
-                          onChange={(e) => setNeutralizeFormulas(e.target.checked)}
-                        />
-                        Neutralize spreadsheet formulas (<code>=</code>, <code>+</code>,{' '}
-                        <code>-</code>, <code>@</code>) in CSV &amp; XLSX
-                      </label>
-                      <div className="wb-drop-buttons">
+                      <div className="wb-export-card-body">
+                        <div className="wb-export-card-head">
+                          <strong>Cleaned Data Files</strong>
+                          <span className="wb-export-tag">Tabular &amp; DB</span>
+                        </div>
+                        <p>
+                          Export the active table in standard analytics formats. Parquet uses{' '}
+                          <code>hyparquet-writer</code>; XLSX preserves text IDs up to 50 MB.
+                        </p>
+                        <label className="wb-check-inline">
+                          <input
+                            type="checkbox"
+                            checked={neutralizeFormulas}
+                            onChange={(e) => setNeutralizeFormulas(e.target.checked)}
+                          />
+                          Neutralize spreadsheet formulas (<code>=</code>, <code>+</code>,{' '}
+                          <code>-</code>, <code>@</code>) in CSV &amp; XLSX
+                        </label>
+                      </div>
+                      <div className="wb-export-actions">
                         <button
                           type="button"
                           className="wb-btn wb-btn-primary"
@@ -3231,20 +4450,53 @@ export function WorkbenchShell() {
                         >
                           <IconDownload className="wb-ico-xs" /> Export XLSX (&le; 50 MB)
                         </button>
+                        <button
+                          type="button"
+                          className="wb-btn wb-btn-outline"
+                          disabled={!activeTable || isBusy}
+                          onClick={() => void handleExportData('duckdb')}
+                        >
+                          <IconDownload className="wb-ico-xs" /> Export .duckdb
+                        </button>
                       </div>
-                      <small className="wb-muted">
-                        Parquet via <code>hyparquet-writer</code>; XLSX via <code>fflate</code> with
-                        text preservation &amp; 50 MB cap.
-                      </small>
                     </div>
 
                     <div className="wb-export-card">
-                      <strong>Reproducible Pipeline</strong>
-                      <p>
-                        Share-safe check: {shareFindings.length} literal/salt warning(s) detected in{' '}
-                        <code>recipe.steps</code>.
-                      </p>
-                      <div className="wb-drop-buttons">
+                      <div className="wb-export-card-body">
+                        <div className="wb-export-card-head">
+                          <strong>Self-Contained HTML Report</strong>
+                          <span className="wb-export-tag">Offline Audit</span>
+                        </div>
+                        <p>
+                          Generates a single zero-dependency <code>.html</code> audit report with
+                          schema types, redaction modes, profile issues, recipe SQL, and a 50-row
+                          preview.
+                        </p>
+                      </div>
+                      <div className="wb-export-actions">
+                        <button
+                          type="button"
+                          className="wb-btn wb-btn-primary"
+                          disabled={!activeTable || isBusy}
+                          onClick={() => void handleExportHtmlReport()}
+                        >
+                          <IconDownload className="wb-ico-xs" /> Export .html Report
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="wb-export-card">
+                      <div className="wb-export-card-body">
+                        <div className="wb-export-card-head">
+                          <strong>Reproducible Pipeline</strong>
+                          <span className="wb-export-tag">Share-Safe</span>
+                        </div>
+                        <p>
+                          Download the portable <code>.dew.json</code> recipe or full deterministic
+                          DuckDB <code>.sql</code> script for headless replay.
+                        </p>
+                      </div>
+                      <div className="wb-export-actions">
                         <button
                           type="button"
                           className="wb-btn wb-btn-primary"
@@ -3273,6 +4525,38 @@ export function WorkbenchShell() {
                         </button>
                       </div>
                     </div>
+
+                    <div className="wb-export-card">
+                      <div className="wb-export-card-body">
+                        <div className="wb-export-card-head">
+                          <strong>Reversible Tokenization Key Map</strong>
+                          <span className="wb-export-tag wb-export-tag-warn">Local Only</span>
+                        </div>
+                        <p>
+                          Exports the <code>original_value ↔ sha256 token</code> lookup table for
+                          columns set to <code>hash_sha256</code> in Redact. Never included in{' '}
+                          <code>#r=</code> share links.
+                        </p>
+                      </div>
+                      <div className="wb-export-actions">
+                        <button
+                          type="button"
+                          className="wb-btn wb-btn-outline"
+                          disabled={!activeTable || isBusy}
+                          onClick={() => void handleExportTokenKeyMap('json')}
+                        >
+                          <IconDownload className="wb-ico-xs" /> Export Key Map (.json)
+                        </button>
+                        <button
+                          type="button"
+                          className="wb-btn wb-btn-outline"
+                          disabled={!activeTable || isBusy}
+                          onClick={() => void handleExportTokenKeyMap('csv')}
+                        >
+                          <IconDownload className="wb-ico-xs" /> Export Key Map (.csv)
+                        </button>
+                      </div>
+                    </div>
                   </div>
                 </div>
               ) : null}
@@ -3288,6 +4572,12 @@ export function WorkbenchShell() {
               result={queryResult}
               error={queryError ?? engineError}
               pageNav={gridPageNav}
+              editable={
+                activeFeature === 'data' && Boolean(activeTable && activeTable.id !== '_rejects')
+              }
+              onEditCell={handleEditCell}
+              onInsertRowAfter={handleInsertRowAfter}
+              onDeleteRow={handleDeleteRow}
             />
           ) : null}
         </main>
@@ -3448,11 +4738,10 @@ export function WorkbenchShell() {
           <div className="wb-modal-dialog">
             <div className="wb-modal-head">
               <div>
-                <h2>Unmess &amp; Type-Guarded Ingest</h2>
+                <h2>Load Local Dataset</h2>
                 <p>
-                  Pre-normalizes BOM, Windows-1252, mixed line endings, banners &amp; XLSX in a
-                  compute worker, then applies strict <code>^[+-]?[0-9]+$</code> integer &amp; ID
-                  veto scoring before casting.
+                  Normalizes encoding &amp; messy headers in a local worker, then applies strict ID
+                  &amp; type-veto scoring before loading.
                 </p>
               </div>
               <button
@@ -3478,12 +4767,20 @@ export function WorkbenchShell() {
                 onDragLeave={() => setDragOver(false)}
                 onDrop={handleDrop}
               >
-                <IconUpload className="wb-drop-icon" />
-                <strong>Drop a CSV, TSV, XLSX (≤ 50 MB), Parquet, JSON, or NDJSON file</strong>
-                <span>
-                  50 MB+ CSV/Parquet streams lazily via <code>BROWSER_FILEREADER</code> handles;
-                  XLSX parses chunk-by-chunk via <code>fflate</code>.
-                </span>
+                <div className="wb-drop-icon-wrap" aria-hidden="true">
+                  <IconUpload className="wb-drop-icon" />
+                </div>
+                <strong>Drop a file here, or choose from your computer</strong>
+                <div className="wb-format-pills" aria-label="Supported file formats">
+                  <span>CSV</span>
+                  <span>TSV</span>
+                  <span>XLSX ≤ 50 MB</span>
+                  <span>Parquet</span>
+                  <span>JSON</span>
+                  <span>NDJSON</span>
+                  <span>.duckdb</span>
+                  <span>.sqlite</span>
+                </div>
                 <div className="wb-drop-buttons">
                   <button
                     type="button"
@@ -3499,7 +4796,7 @@ export function WorkbenchShell() {
                     disabled={isBusy}
                     onClick={() => void handleLoadMessyDemo()}
                   >
-                    Stage Messy Fintech Demo (1,200 rows)
+                    Try Messy Fintech Demo (1,200 rows)
                   </button>
                 </div>
               </div>

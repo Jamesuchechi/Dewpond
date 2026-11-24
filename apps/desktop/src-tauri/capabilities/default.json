@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Minimal least-privilege capability for Dewpond offline workbench (no network or shell permissions).",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

@@ -4,7 +4,8 @@ export type StepId = string;
 
 export type LogicalType = 'VARCHAR' | 'BIGINT' | 'DOUBLE' | 'BOOLEAN' | 'DATE' | 'TIMESTAMP';
 
-export type SourceKind = 'csv' | 'tsv' | 'xlsx' | 'json' | 'ndjson' | 'parquet';
+export type SourceKind =
+  'csv' | 'tsv' | 'xlsx' | 'json' | 'ndjson' | 'parquet' | 'duckdb' | 'sqlite';
 
 export interface SchemaColumn {
   name: string;
@@ -160,6 +161,25 @@ export type Step =
       locale: 'us_currency' | 'eu_decimal';
     };
 
+export interface CellEditEntry {
+  rid: string;
+  column: string;
+  value: string | null;
+}
+
+export interface InsertedRowEntry {
+  rid: string;
+  ord: number;
+  values: Record<string, string | null>;
+}
+
+export interface EditOverlay {
+  tableId: TableId;
+  cellEdits: CellEditEntry[];
+  deletedRids: string[];
+  insertedRows: InsertedRowEntry[];
+}
+
 export interface Recipe {
   version: 1;
   id: string;
@@ -167,6 +187,7 @@ export interface Recipe {
   sources: SourceRef[];
   steps: Step[];
   head: number;
+  overlay?: EditOverlay;
   createdAt: number;
   updatedAt: number;
 }

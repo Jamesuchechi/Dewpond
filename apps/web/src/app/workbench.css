@@ -336,11 +336,110 @@ pre,
   overflow-y: auto;
 }
 
-.wb-welcome-card {
+.wb-welcome-wrap {
   flex: 1;
   display: flex;
-  flex-direction: column;
+  align-items: center;
   justify-content: center;
+  padding: 1.5rem 1rem;
+  min-height: 0;
+}
+
+.wb-welcome-card {
+  width: min(740px, 100%);
+  padding: 2rem 2rem 1.65rem;
+  border-radius: 16px;
+  border: 1px solid var(--wb-border);
+  box-shadow:
+    0 12px 32px -12px rgba(10, 22, 40, 0.08),
+    0 2px 6px -1px rgba(10, 22, 40, 0.04);
+  display: flex;
+  flex-direction: column;
+  gap: 1.35rem;
+}
+
+.wb-welcome-head {
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.wb-welcome-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.22rem 0.65rem;
+  border-radius: 999px;
+  background: var(--wb-emerald-bg);
+  color: #047857;
+  border: 1px solid #a7f3d0;
+  font-size: 0.74rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.wb-welcome-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--wb-emerald);
+}
+
+.wb-welcome-head h1 {
+  margin: 0.1rem 0 0;
+  font-size: 1.4rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--wb-navy);
+}
+
+.wb-welcome-head p {
+  margin: 0;
+  max-width: 560px;
+  font-size: 0.88rem;
+  line-height: 1.55;
+  color: var(--wb-muted);
+}
+
+.wb-welcome-pillars {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.75rem;
+  padding-top: 0.25rem;
+}
+
+.wb-pillar {
+  padding: 0.75rem 0.85rem;
+  border-radius: 10px;
+  background: var(--wb-bg);
+  border: 1px solid var(--wb-border);
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.wb-pillar strong {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--wb-text);
+}
+
+.wb-pillar span {
+  font-size: 0.75rem;
+  line-height: 1.45;
+  color: var(--wb-muted);
+}
+
+@media (max-width: 720px) {
+  .wb-welcome-card {
+    padding: 1.35rem 1.15rem;
+  }
+
+  .wb-welcome-pillars {
+    grid-template-columns: 1fr;
+  }
 }
 
 .wb-modal-backdrop {
@@ -472,32 +571,74 @@ pre,
   flex-direction: column;
   align-items: center;
   text-align: center;
-  gap: 0.45rem;
-  padding: 1.75rem 1rem;
+  gap: 0.6rem;
+  padding: 2rem 1.25rem;
   border: 1.5px dashed var(--wb-border-strong);
-  border-radius: 10px;
-  background: var(--wb-bg);
+  border-radius: 12px;
+  background: linear-gradient(180deg, #f8fafc 0%, #f1f5f9 100%);
+  transition:
+    border-color 0.16s ease,
+    background 0.16s ease,
+    box-shadow 0.16s ease;
+}
+
+.wb-dropzone:hover {
+  border-color: #94a3b8;
+  background: linear-gradient(180deg, #f8fafc 0%, #eff6ff 100%);
 }
 
 .wb-dropzone.dragover {
   border-color: var(--wb-cobalt);
   background: #eff6ff;
+  box-shadow: 0 0 0 3px rgba(29, 78, 216, 0.12);
+}
+
+.wb-drop-icon-wrap {
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+  background: rgba(29, 78, 216, 0.1);
+  border: 1px solid rgba(29, 78, 216, 0.16);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 0.1rem;
 }
 
 .wb-drop-icon {
-  width: 28px;
-  height: 28px;
+  width: 22px;
+  height: 22px;
   color: var(--wb-cobalt);
 }
 
-.wb-dropzone span {
-  font-size: 0.84rem;
-  color: var(--wb-muted);
+.wb-dropzone strong {
+  font-size: 0.94rem;
+  font-weight: 600;
+  color: var(--wb-text);
+}
+
+.wb-format-pills {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.35rem;
+}
+
+.wb-format-pills span {
+  padding: 0.15rem 0.5rem;
+  border-radius: 6px;
+  background: var(--wb-surface);
+  border: 1px solid var(--wb-border);
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--wb-text-2);
+  font-family: var(--wb-mono);
 }
 
 .wb-drop-buttons {
   display: flex;
   flex-wrap: wrap;
+  justify-content: center;
   gap: 0.6rem;
   margin-top: 0.45rem;
 }
@@ -727,33 +868,195 @@ pre,
   align-items: start;
 }
 
-.wb-kanon-card,
-.wb-export-card {
-  padding: 0.9rem;
-  border-radius: 8px;
+.wb-export-studio {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.wb-export-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 0.75rem;
+}
+
+.wb-export-stat {
+  padding: 0.85rem 0.95rem;
+  border-radius: 10px;
   border: 1px solid var(--wb-border);
   background: var(--wb-bg);
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.wb-export-stat span {
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--wb-muted);
+}
+
+.wb-export-stat strong {
+  font-size: 0.96rem;
+  color: var(--wb-navy);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wb-export-stat small {
+  font-size: 0.75rem;
+  color: var(--wb-muted);
+}
+
+.wb-export-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.14rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.74rem;
+  font-weight: 600;
+}
+
+.wb-export-pill-safe {
+  background: var(--wb-emerald-bg);
+  color: #047857;
+  border: 1px solid #a7f3d0;
+}
+
+.wb-export-pill-warn {
+  background: var(--wb-amber-bg);
+  color: #b45309;
+  border: 1px solid #fde68a;
+}
+
+.wb-export-grid {
   display: grid;
-  gap: 0.65rem;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem;
+}
+
+@media (max-width: 900px) {
+  .wb-export-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.wb-kanon-card,
+.wb-export-card {
+  padding: 1.1rem 1.15rem;
+  border-radius: 12px;
+  border: 1px solid var(--wb-border);
+  background: var(--wb-surface);
+  box-shadow: 0 2px 8px -2px rgba(10, 22, 40, 0.05);
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 0.9rem;
+}
+
+.wb-export-card-body {
+  display: grid;
+  gap: 0.55rem;
+}
+
+.wb-export-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.wb-export-card-head strong {
+  font-size: 0.95rem;
+  color: var(--wb-navy);
+}
+
+.wb-export-tag {
+  padding: 0.14rem 0.5rem;
+  border-radius: 6px;
+  background: var(--wb-surface-muted);
+  border: 1px solid var(--wb-border);
+  font-size: 0.71rem;
+  font-weight: 600;
+  color: var(--wb-text-2);
+}
+
+.wb-export-tag-warn {
+  background: var(--wb-amber-bg);
+  border-color: #fde68a;
+  color: #b45309;
 }
 
 .wb-kanon-card p,
 .wb-export-card p {
   margin: 0;
   font-size: 0.82rem;
+  line-height: 1.5;
   color: var(--wb-text-2);
+}
+
+.wb-export-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  padding-top: 0.25rem;
+  border-top: 1px solid var(--wb-border);
+}
+
+.wb-nl-card {
+  margin-top: 0.9rem;
+  padding: 0.95rem 1.05rem;
+  border-radius: 10px;
+  border: 1px solid var(--wb-border);
+  background: var(--wb-bg);
+  display: grid;
+  gap: 0.7rem;
+}
+
+.wb-nl-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.wb-nl-head > div:first-child {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.wb-nl-preview summary {
+  cursor: pointer;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--wb-text-2);
+}
+
+.wb-nl-preview pre {
+  margin: 0.45rem 0;
+  padding: 0.65rem 0.75rem;
+  border-radius: 8px;
+  background: var(--wb-navy);
+  color: #e2e8f0;
+  font-size: 0.74rem;
+  max-height: 180px;
+  overflow: auto;
+}
+
+.wb-nl-byo {
+  display: grid;
+  gap: 0.55rem;
 }
 
 .wb-qi-list {
   display: flex;
   flex-wrap: wrap;
   gap: 0.45rem 0.75rem;
-}
-
-.wb-export-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-  gap: 1rem;
 }
 
 /* Data Grid Card */
@@ -877,6 +1180,37 @@ pre,
   color: var(--wb-muted);
   text-align: right;
   background: var(--wb-bg);
+  white-space: nowrap;
+}
+
+.wb-row-ops {
+  display: inline-flex;
+  gap: 2px;
+  margin-left: 5px;
+}
+
+.wb-row-op-btn {
+  padding: 0 4px;
+  border: 1px solid var(--wb-border-strong);
+  border-radius: 3px;
+  background: #ffffff;
+  color: var(--wb-text-2);
+  font-size: 0.68rem;
+  line-height: 1.2;
+  cursor: pointer;
+}
+
+.wb-editing-cell {
+  padding: 0 !important;
+}
+
+.wb-cell-input {
+  width: 100%;
+  min-width: 90px;
+  padding: 0.25rem 0.45rem;
+  border: 2px solid var(--wb-cobalt);
+  font-family: inherit;
+  font-size: 0.8rem;
 }
 
 .wb-null-pill {

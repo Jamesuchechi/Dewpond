@@ -97,11 +97,11 @@ All Milestone S spikes (S1–S9) plus replacement verification checks (R1–R3) 
 ## Post-v1 Backlog *(Explicitly Deferred)*
 
 - [x] **v1.1 Headline Workflow — Compare (Diff):** Key picker + uniqueness check, `FULL OUTER JOIN` + `IS DISTINCT FROM` added/removed/changed/unchanged grid + schema diff + CSV/XLSX diff export (`⏱3d`)
-- [ ] **Cell/row editing (formerly M2.5):** overlay keyed by `__rid` + fractional `ord DOUBLE` ordering + keyset grid paging + share-link exclusion
-- [ ] **Fuzzy Reconcile & Fuzzy Dedupe** with blocking, tolerance rules, and review queue
-- [ ] **Pivot / Unpivot** UI step (with column-cardinality cap)
-- [ ] **`.duckdb` `ATTACH`/export & SQLite support** (pending verified stable DuckDB-WASM `copyFileToBuffer`)
-- [ ] **Self-contained HTML report** & **reversible tokenization key maps**
-- [ ] **Optional signed offline desktop wrapper (Tauri)** if InfoSec interviews require it
-- [ ] **Local-first AI (schema-only NL→SQL)** via WebLLM or opt-in BYO-key with exact-payload preview
+- [x] **Cell/row editing (formerly M2.5):** overlay keyed by `__rid` + fractional `ord DOUBLE` ordering + keyset grid paging + share-link exclusion
+- [x] **Fuzzy Reconcile & Fuzzy Dedupe** with blocking, tolerance rules, and review queue
+- [x] **Pivot / Unpivot** UI step (with column-cardinality cap)
+- [x] **`.duckdb` `ATTACH`/export & SQLite support** (pending verified stable DuckDB-WASM `copyFileToBuffer`)
+- [x] **Self-contained HTML report** & **reversible tokenization key maps**
+- [x] **Optional signed offline desktop wrapper (Tauri)** if InfoSec interviews require it
+- [x] **Local-first AI (schema-only NL→SQL)** via WebLLM or opt-in BYO-key with exact-payload preview
 - [ ] **pandas / Polars export**, CLI (`dewpond run`), public step-plugin API, PWA file-handler registration

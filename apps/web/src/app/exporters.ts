@@ -225,3 +225,180 @@ export function buildXlsxExportBytes(
   }
   return zipped;
 }
+
+function escapeHtml(raw: unknown): string {
+  const str = raw === null || raw === undefined ? '' : String(raw);
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+export interface HtmlReportStepSummary {
+  stepId: string;
+  label: string;
+  sql: string;
+}
+
+export interface HtmlReportIssueSummary {
+  columnName: string;
+  severity: string;
+  message: string;
+}
+
+export interface HtmlReportOptions {
+  datasetName: string;
+  activeAlias: string;
+  rowCount: number;
+  columns: readonly GridColumnMeta[];
+  previewRows: readonly unknown[][];
+  steps: readonly HtmlReportStepSummary[];
+  issues?: readonly HtmlReportIssueSummary[];
+  redactModes?: Record<string, string>;
+  generatedAtIso?: string;
+}
+
+/** Build a zero-dependency, self-contained HTML audit & data report. */
+export function buildSelfContainedHtmlReport(opts: HtmlReportOptions): Uint8Array {
+  const generatedAt = opts.generatedAtIso ?? new Date().toISOString();
+  const sampleRows = opts.previewRows.slice(0, 50);
+
+  const schemaRowsHtml = opts.columns
+    .map((c) => {
+      const redactMode = opts.redactModes?.[c.name] ?? 'keep';
+      return `<tr>
+        <td><code>${escapeHtml(c.name)}</code></td>
+        <td><span class="badge">${escapeHtml(c.type)}</span></td>
+        <td><span class="badge">${escapeHtml(redactMode)}</span></td>
+      </tr>`;
+    })
+    .join('\n');
+
+  const issuesHtml =
+    opts.issues && opts.issues.length > 0
+      ? `<ul>${opts.issues
+          .map(
+            (iss) =>
+              `<li><strong>${escapeHtml(iss.columnName)}</strong> [${escapeHtml(iss.severity)}]: ${escapeHtml(iss.message)}</li>`,
+          )
+          .join('')}</ul>`
+      : '<p class="muted">No profile issues flagged for the active dataset.</p>';
+
+  const stepsHtml =
+    opts.steps.length > 0
+      ? `<ol class="steps">${opts.steps
+          .map(
+            (s) =>
+              `<li><div class="step-title"><strong>${escapeHtml(s.stepId)}</strong> — ${escapeHtml(s.label)}</div><pre><code>${escapeHtml(s.sql)}</code></pre></li>`,
+          )
+          .join('')}</ol>`
+      : '<p class="muted">No transformation steps applied (source table only).</p>';
+
+  const previewHeaderHtml = opts.columns.map((c) => `<th>${escapeHtml(c.name)}</th>`).join('');
+  const previewBodyHtml = sampleRows
+    .map(
+      (row) =>
+        `<tr>${opts.columns
+          .map((_, idx) => `<td>${escapeHtml(row[idx] ?? '')}</td>`)
+          .join('')}</tr>`,
+    )
+    .join('\n');
+
+  const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Dewpond Report — ${escapeHtml(opts.datasetName)}</title>
+  <style>
+    :root { color-scheme: light; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    body { margin: 0; background: #f8fafc; color: #0f172a; line-height: 1.5; }
+    .wrap { max-width: 1120px; margin: 0 auto; padding: 2rem 1.5rem 3rem; }
+    .hero { background: #0a1628; color: #f8fafc; border-radius: 14px; padding: 1.5rem 1.75rem; margin-bottom: 1.25rem; }
+    .hero h1 { margin: 0 0 0.35rem; font-size: 1.35rem; }
+    .hero p { margin: 0; color: #cbd5e1; font-size: 0.9rem; }
+    .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 0.75rem; margin-bottom: 1.25rem; }
+    .stat { background: #fff; border: 1px solid #e2e8f0; border-radius: 10px; padding: 0.85rem 1rem; }
+    .stat small { display: block; color: #64748b; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.04em; }
+    .stat strong { font-size: 1.15rem; color: #0f172a; }
+    .card { background: #fff; border: 1px solid #e2e8f0; border-radius: 12px; padding: 1.15rem 1.25rem; margin-bottom: 1rem; }
+    .card h2 { margin: 0 0 0.75rem; font-size: 1rem; color: #0a1628; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
+    th, td { text-align: left; padding: 0.45rem 0.6rem; border-bottom: 1px solid #e2e8f0; white-space: nowrap; }
+    th { background: #f1f5f9; font-weight: 600; color: #334155; }
+    .table-scroll { overflow-x: auto; }
+    .badge { display: inline-block; padding: 0.1rem 0.45rem; border-radius: 6px; background: #eff6ff; color: #1d4ed8; font-family: ui-monospace, monospace; font-size: 0.74rem; }
+    pre { background: #0f172a; color: #e2e8f0; padding: 0.65rem 0.8rem; border-radius: 8px; overflow-x: auto; font-size: 0.76rem; }
+    .steps { padding-left: 1.25rem; margin: 0; display: grid; gap: 0.75rem; }
+    .muted { color: #64748b; font-size: 0.85rem; margin: 0; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header class="hero">
+      <h1>Dewpond Local Audit Report — ${escapeHtml(opts.datasetName)}</h1>
+      <p>Active alias: <code>${escapeHtml(opts.activeAlias)}</code> · Generated locally at ${escapeHtml(generatedAt)} · Zero server upload</p>
+    </header>
+    <section class="stats">
+      <div class="stat"><small>Rows</small><strong>${opts.rowCount.toLocaleString('en-US')}</strong></div>
+      <div class="stat"><small>Columns</small><strong>${opts.columns.length}</strong></div>
+      <div class="stat"><small>Recipe Steps</small><strong>${opts.steps.length}</strong></div>
+      <div class="stat"><small>Profile Issues</small><strong>${opts.issues?.length ?? 0}</strong></div>
+    </section>
+    <section class="card">
+      <h2>Schema &amp; Redaction Plan</h2>
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th>Column</th><th>Type</th><th>Redaction Mode</th></tr></thead>
+          <tbody>${schemaRowsHtml}</tbody>
+        </table>
+      </div>
+    </section>
+    <section class="card">
+      <h2>Profile Findings</h2>
+      ${issuesHtml}
+    </section>
+    <section class="card">
+      <h2>Reproducible Recipe Pipeline</h2>
+      ${stepsHtml}
+    </section>
+    <section class="card">
+      <h2>Data Preview (First ${sampleRows.length} rows)</h2>
+      <div class="table-scroll">
+        <table>
+          <thead><tr>${previewHeaderHtml}</tr></thead>
+          <tbody>${previewBodyHtml}</tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+</body>
+</html>`;
+
+  return new TextEncoder().encode(html);
+}
+
+export interface TokenizationKeyEntry {
+  column: string;
+  original: string;
+  token: string;
+}
+
+/** Build a reversible tokenization key map JSON payload (strictly local, never for share URLs). */
+export function buildTokenizationKeyMapJson(
+  tableAlias: string,
+  entries: readonly TokenizationKeyEntry[],
+  generatedAtIso = new Date().toISOString(),
+): Uint8Array {
+  const payload = {
+    format: 'dewpond-token-keymap/v1',
+    warning: 'CONFIDENTIAL REVERSIBLE KEY MAP — DO NOT SHARE PUBLICLY',
+    tableAlias,
+    generatedAt: generatedAtIso,
+    entryCount: entries.length,
+    entries,
+  };
+  return new TextEncoder().encode(JSON.stringify(payload, null, 2));
+}

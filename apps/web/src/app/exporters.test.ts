@@ -4,6 +4,8 @@ import {
   buildCsvExportBytes,
   buildNdjsonExportBytes,
   buildParquetExportBytes,
+  buildSelfContainedHtmlReport,
+  buildTokenizationKeyMapJson,
   buildXlsxExportBytes,
   neutralizeSpreadsheetFormula,
 } from './exporters';
@@ -52,5 +54,43 @@ describe('M3 exporters', () => {
     expect(parsed.columns.find((c) => c.name === 'phone')?.values[0]).toBe('08012345678');
     expect(parsed.columns.find((c) => c.name === 'amount')?.values[0]).toBe('1500.50');
     expect(parsed.columns.find((c) => c.name === 'note')?.values[0]).toBe("'=CMD|calc");
+  });
+
+  it('builds a self-contained HTML report with escaped content and zero external URLs', () => {
+    const htmlBytes = buildSelfContainedHtmlReport({
+      datasetName: 'payroll_<script>alert(1)</script>',
+      activeAlias: 'payroll@s1',
+      rowCount: 1,
+      columns: [
+        { name: 'emp_id', type: 'Utf8' },
+        { name: 'email', type: 'Utf8' },
+      ],
+      previewRows: [['00123', '<img onerror=alert(1)>']],
+      steps: [{ stepId: 's1', label: 'Trim', sql: 'SELECT * FROM "payroll";' }],
+      issues: [{ columnName: 'email', severity: 'warn', message: 'Contains PII' }],
+      redactModes: { emp_id: 'keep', email: 'hash_sha256' },
+      generatedAtIso: '2026-11-24T00:00:00.000Z',
+    });
+    const html = new TextDecoder().decode(htmlBytes);
+    expect(html).toContain('<!DOCTYPE html>');
+    expect(html).toContain('&lt;script&gt;alert(1)&lt;/script&gt;');
+    expect(html).toContain('hash_sha256');
+    expect(html).not.toMatch(/https?:\/\//i);
+  });
+
+  it('builds a reversible tokenization key map JSON payload', () => {
+    const jsonBytes = buildTokenizationKeyMapJson(
+      'payroll',
+      [{ column: 'email', original: 'a@b.com', token: 'deadbeef' }],
+      '2026-11-24T00:00:00.000Z',
+    );
+    const parsed = JSON.parse(new TextDecoder().decode(jsonBytes)) as {
+      format: string;
+      entryCount: number;
+      entries: Array<{ column: string; original: string; token: string }>;
+    };
+    expect(parsed.format).toBe('dewpond-token-keymap/v1');
+    expect(parsed.entryCount).toBe(1);
+    expect(parsed.entries[0]?.token).toBe('deadbeef');
   });
 });

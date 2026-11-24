@@ -1,13 +1,27 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildArrowTableTypedCastSql,
+  buildAttachSql,
   buildCompareDiffSql,
   buildCompareSummarySql,
   buildCsvTypedIngestSql,
+  buildDetachSql,
+  buildExportAttachedTableSql,
+  buildFuzzyDedupeCandidatesSql,
+  buildFuzzyDedupeCommitSql,
+  buildFuzzyReconcileSql,
+  buildImportAttachedTableSql,
   buildKAnonymityQuery,
+  buildKeysetPageSql,
   buildKeyUniquenessCheckSql,
   buildLazyFileIngestSql,
+  buildListAttachedTablesSql,
+  buildPivotCardinalitySql,
+  buildPivotSql,
   buildPopulateRejectsSql,
+  buildTokenizationKeyMapSql,
+  buildUnpivotSql,
+  compileCellRowOverlaySql,
   compileCleanStepSql,
   compileRedactViewSql,
   computeSchemaDiff,
@@ -169,5 +183,120 @@ describe('workbench sqlCompiler', () => {
     });
     expect(sumSql).toContain('added_count');
     expect(sumSql).toContain('changed_count');
+  });
+
+  it('compiles __rid + fractional ord DOUBLE overlay and keyset paging SQL', () => {
+    const overlaySql = compileCellRowOverlaySql(
+      'payroll',
+      'payroll@edits',
+      [
+        { name: '__rid', type: 'Int64' },
+        { name: 'email', type: 'Utf8' },
+        { name: 'amount', type: 'Float64' },
+      ],
+      {
+        tableId: 'payroll',
+        cellEdits: [{ rid: '2', column: 'email', value: 'updated@example.org' }],
+        deletedRids: ['5'],
+        insertedRows: [
+          { rid: '9001', ord: 2.5, values: { email: 'new@example.org', amount: '125.5' } },
+        ],
+      },
+    );
+    expect(overlaySql).toContain(`WHEN "__rid"::VARCHAR = '2' THEN 'updated@example.org'`);
+    expect(overlaySql).toContain(`WHERE "__rid"::VARCHAR NOT IN ('5')`);
+    expect(overlaySql).toContain('2.5::DOUBLE AS "__ord"');
+    expect(overlaySql).toContain('ORDER BY "__ord" ASC, "__rid" ASC');
+
+    const keysetNext = buildKeysetPageSql({
+      alias: 'payroll@edits',
+      pageSize: 500,
+      hasRid: true,
+      hasOrd: true,
+      direction: 'next',
+      cursorOrd: 500,
+      cursorRid: '500',
+    });
+    expect(keysetNext).toContain('("__ord" > 500 OR ("__ord" = 500 AND "__rid" > 500))');
+    expect(keysetNext).not.toContain('OFFSET');
+  });
+
+  it('compiles Fuzzy Dedupe & Fuzzy Reconcile SQL with blocking and numeric tolerance', () => {
+    const candSql = buildFuzzyDedupeCandidatesSql({
+      tableAlias: 'vendors',
+      matchColumn: 'vendor_name',
+      blockingMode: 'prefix_3',
+      minSimilarity: 0.85,
+      numericColumn: 'amount',
+      numericTolerance: 5.0,
+    });
+    expect(candSql).toContain('jaro_winkler_similarity');
+    expect(candSql).toContain('left(lower(trim(coalesce(A."vendor_name"::VARCHAR, \'\'))), 3)');
+    expect(candSql).toContain('<= 5');
+
+    const commitSql = buildFuzzyDedupeCommitSql('vendors', 'vendors@s1', ['12', '19']);
+    expect(commitSql).toContain(`WHERE "__rid"::VARCHAR NOT IN ('12', '19')`);
+
+    const recSql = buildFuzzyReconcileSql({
+      leftAlias: 'bank_tx',
+      rightAlias: 'ledger_tx',
+      keyColumn: 'merchant',
+      blockingMode: 'first_token',
+      minSimilarity: 0.8,
+    });
+    expect(recSql).toContain('split_part(');
+    expect(recSql).toContain('__reconcile_status');
+  });
+
+  it('compiles Pivot cardinality check, Pivot, and Unpivot SQL cleanly', () => {
+    const cardSql = buildPivotCardinalitySql('sales', 'region');
+    expect(cardSql).toContain('count(DISTINCT "region")::INTEGER AS "distinct_count"');
+
+    const pivotSql = buildPivotSql({
+      sourceAlias: 'sales',
+      targetAlias: 'sales@s1',
+      indexColumns: ['year', 'category'],
+      pivotColumn: 'region',
+      valueColumn: 'revenue',
+      aggFn: 'SUM',
+    });
+    expect(pivotSql).toContain('PIVOT (SELECT * EXCLUDE ("__rid") FROM "sales")');
+    expect(pivotSql).toContain('ON "region"');
+    expect(pivotSql).toContain('USING sum("revenue")');
+    expect(pivotSql).toContain('GROUP BY "year", "category"');
+
+    const unpivotSql = buildUnpivotSql({
+      sourceAlias: 'sales@s1',
+      targetAlias: 'sales@s2',
+      unpivotColumns: ['q1', 'q2'],
+      nameColumn: 'quarter',
+      valueColumn: 'amount',
+    });
+    expect(unpivotSql).toContain('UNPIVOT (SELECT * EXCLUDE ("__rid") FROM "sales@s1")');
+    expect(unpivotSql).toContain('ON "q1", "q2"');
+    expect(unpivotSql).toContain('NAME "quarter"');
+    expect(unpivotSql).toContain('VALUE "amount"');
+  });
+
+  it('compiles .duckdb ATTACH, SQLite ATTACH, import, export, and DETACH SQL', () => {
+    expect(buildAttachSql('__upload.duckdb', '__ext', 'duckdb')).toBe(
+      `ATTACH '__upload.duckdb' AS "__ext" (READ_ONLY);`,
+    );
+    expect(buildAttachSql('__upload.sqlite', '__ext', 'sqlite')).toBe(
+      `ATTACH '__upload.sqlite' AS "__ext" (TYPE SQLITE, READ_ONLY);`,
+    );
+    expect(buildListAttachedTablesSql('__ext')).toContain(`WHERE table_catalog = '__ext'`);
+    expect(buildImportAttachedTableSql('__ext', 'orders', 'orders', true)).toContain(
+      'EXCLUDE ("__rid")',
+    );
+    expect(buildExportAttachedTableSql('__out', 'orders@s1', 'orders')).toContain(
+      'CREATE OR REPLACE TABLE "__out"."orders" AS',
+    );
+    expect(buildDetachSql('__ext')).toBe('DETACH "__ext";');
+
+    const keyMapSql = buildTokenizationKeyMapSql('customers', ['email', 'ssn'], 'salt_v1');
+    expect(keyMapSql).toContain(`'email' AS "column_name"`);
+    expect(keyMapSql).toContain(`sha256('salt_v1|' || "ssn"::VARCHAR) AS "token"`);
+    expect(keyMapSql).toContain('UNION ALL');
   });
 });

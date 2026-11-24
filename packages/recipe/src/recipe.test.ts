@@ -145,4 +145,28 @@ describe('@dewpond/recipe', () => {
     const remapped = remapRecipeColumns(recipe, { customer_email: 'email_addr' });
     expect(detectSchemaDrift(remapped, ['email_addr', 'gross_amt', 'status'])).toEqual([]);
   });
+
+  it('excludes local cell/row edit overlay from #r= share links', () => {
+    const withOverlay: Recipe = {
+      ...baseRecipe([{ id: 's1', op: 'trim', table: 'sales', columns: ['email'] }]),
+      overlay: {
+        tableId: 'sales',
+        cellEdits: [{ rid: '42', column: 'email', value: 'private@secret.test' }],
+        deletedRids: ['99'],
+        insertedRows: [{ rid: '10001', ord: 42.5, values: { email: 'inserted@secret.test' } }],
+      },
+    };
+
+    const findings = findShareUnsafeLiterals(withOverlay);
+    expect(findings.some((f) => f.stepId === 'overlay')).toBe(true);
+
+    const token = encodeShareRecipe(withOverlay);
+    const decoded = decodeShareRecipe(token);
+    expect(decoded.ok).toBe(true);
+    if (decoded.ok) {
+      expect(decoded.recipe.overlay).toBeUndefined();
+      expect(JSON.stringify(decoded.recipe)).not.toContain('private@secret.test');
+      expect(JSON.stringify(decoded.recipe)).not.toContain('inserted@secret.test');
+    }
+  });
 });

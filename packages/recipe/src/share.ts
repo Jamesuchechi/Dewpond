@@ -109,9 +109,14 @@ function fromBase64Url(input: string): Uint8Array {
   return out;
 }
 
-/** Encode a Recipe as a compressed #r= URL fragment token. */
+/**
+ * Encode a Recipe as a compressed #r= URL fragment token.
+ * Local cell/row edit overlays are explicitly excluded from #r= share links.
+ */
 export function encodeShareRecipe(recipe: Recipe): string {
-  const jsonBytes = encodeUtf8(JSON.stringify(recipe));
+  const shareSafeRecipe: Recipe = { ...recipe };
+  delete shareSafeRecipe.overlay;
+  const jsonBytes = encodeUtf8(JSON.stringify(shareSafeRecipe));
   const compressed = deflateSync(jsonBytes, { level: 6 });
   return `#r=${toBase64Url(compressed)}`;
 }
@@ -297,6 +302,19 @@ export function findShareUnsafeLiterals(recipe: Recipe): ShareLiteralFinding[] {
       case 'parseNumber':
         break;
     }
+  }
+
+  if (
+    recipe.overlay &&
+    (recipe.overlay.cellEdits.length > 0 ||
+      recipe.overlay.deletedRids.length > 0 ||
+      recipe.overlay.insertedRows.length > 0)
+  ) {
+    findings.push({
+      stepId: 'overlay',
+      op: 'createTable',
+      reason: 'Local cell/row edit overlay is excluded from #r= share links.',
+    });
   }
 
   return findings;

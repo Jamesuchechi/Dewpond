@@ -211,6 +211,44 @@ export class DuckDBClient {
     });
   }
 
+  async registerFileBuffer(virtualName: string, buffer: Uint8Array): Promise<string> {
+    return this.enqueue(async (_conn, db) => {
+      await db.registerFileBuffer(virtualName, buffer);
+      return virtualName;
+    });
+  }
+
+  async dropVirtualFile(virtualName: string): Promise<void> {
+    return this.enqueue(async (_conn, db) => {
+      await db.dropFile(virtualName).catch(() => undefined);
+    });
+  }
+
+  async exportDuckdbFile(
+    tables: ReadonlyArray<{ alias: string; exportName: string }>,
+  ): Promise<Uint8Array> {
+    return this.enqueue(async (conn, db) => {
+      const outName = `__dewpond_export_${Date.now()}.duckdb`;
+      const attachAlias = `__dewpond_out_${Date.now()}`;
+      await conn.query(`ATTACH ${lit(outName)} AS ${ident(attachAlias)};`);
+      try {
+        for (const t of tables) {
+          await conn.query(
+            `CREATE OR REPLACE TABLE ${ident(attachAlias)}.${ident(t.exportName)} AS SELECT * EXCLUDE ("__rid") FROM ${ident(t.alias)};`,
+          );
+        }
+      } finally {
+        await conn.query(`DETACH ${ident(attachAlias)};`).catch(() => undefined);
+      }
+      try {
+        const buf = await db.copyFileToBuffer(outName);
+        return new Uint8Array(buf);
+      } finally {
+        await db.dropFile(outName).catch(() => undefined);
+      }
+    });
+  }
+
   async insertArrowIpc(tableName: string, ipcBytes: Uint8Array): Promise<void> {
     return this.enqueue(async (conn) => {
       await conn.query(`DROP TABLE IF EXISTS ${ident(tableName)};`);
