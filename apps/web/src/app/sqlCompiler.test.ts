@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import {
   buildArrowTableTypedCastSql,
   buildAttachSql,
+  buildBarChartSql,
+  buildBoxPlotChartSql,
   buildCompareDiffSql,
   buildCompareSummarySql,
   buildCsvTypedIngestSql,
@@ -10,15 +12,18 @@ import {
   buildFuzzyDedupeCandidatesSql,
   buildFuzzyDedupeCommitSql,
   buildFuzzyReconcileSql,
+  buildHistogramChartSql,
   buildImportAttachedTableSql,
   buildKAnonymityQuery,
   buildKeysetPageSql,
   buildKeyUniquenessCheckSql,
   buildLazyFileIngestSql,
+  buildLineChartSql,
   buildListAttachedTablesSql,
   buildPivotCardinalitySql,
   buildPivotSql,
   buildPopulateRejectsSql,
+  buildScatterChartSql,
   buildTokenizationKeyMapSql,
   buildUnpivotSql,
   compileCellRowOverlaySql,
@@ -298,5 +303,55 @@ describe('workbench sqlCompiler', () => {
     expect(keyMapSql).toContain(`'email' AS "column_name"`);
     expect(keyMapSql).toContain(`sha256('salt_v1|' || "ssn"::VARCHAR) AS "token"`);
     expect(keyMapSql).toContain('UNION ALL');
+  });
+
+  it('compiles Bar, Histogram, Line, and Scatter chart aggregation SQL', () => {
+    const barSql = buildBarChartSql({
+      tableAlias: 'sales',
+      xColumn: 'region',
+      yColumn: 'revenue',
+      aggFn: 'SUM',
+      topN: 15,
+    });
+    expect(barSql).toContain('GROUP BY 1');
+    expect(barSql).toContain('LIMIT 15;');
+
+    const histSql = buildHistogramChartSql({ tableAlias: 'sales', column: 'revenue', bins: 10 });
+    expect(histSql).toContain('width_bucket');
+    expect(histSql).toContain('bin_min');
+
+    const lineSql = buildLineChartSql({
+      tableAlias: 'sales',
+      xColumn: 'sale_date',
+      yColumn: 'revenue',
+      aggFn: 'AVG',
+      timeGrain: 'month',
+    });
+    expect(lineSql).toContain(`date_trunc('month'`);
+
+    const scatterSql = buildScatterChartSql({
+      tableAlias: 'sales',
+      xColumn: 'price',
+      yColumn: 'units',
+    });
+    expect(scatterSql).toContain('isfinite');
+
+    const groupedBarSql = buildBarChartSql({
+      tableAlias: 'sales',
+      xColumn: 'region',
+      yColumn: 'revenue',
+      seriesColumn: 'channel',
+      aggFn: 'SUM',
+    });
+    expect(groupedBarSql).toContain('AS "series"');
+    expect(groupedBarSql).toContain('GROUP BY 1, 3');
+
+    const boxSql = buildBoxPlotChartSql({
+      tableAlias: 'sales',
+      xColumn: 'region',
+      yColumn: 'revenue',
+    });
+    expect(boxSql).toContain('quantile_cont');
+    expect(boxSql).toContain('AS "median_val"');
   });
 });

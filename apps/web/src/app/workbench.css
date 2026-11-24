@@ -1053,6 +1053,85 @@ pre,
   gap: 0.55rem;
 }
 
+.wb-chart-box {
+  margin-top: 0.85rem;
+  padding: 0.9rem 1rem;
+  border-radius: 10px;
+  border: 1px solid var(--wb-border);
+  background: var(--wb-surface);
+  display: grid;
+  gap: 0.65rem;
+}
+
+.wb-chart-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.wb-chart-toolbar > div:first-child {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.wb-chart-hint {
+  font-size: 0.74rem;
+  color: var(--wb-muted);
+}
+
+.wb-chart-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.wb-chart-svg-wrap {
+  width: 100%;
+  overflow-x: auto;
+}
+
+.wb-chart-svg {
+  width: 100%;
+  max-width: 100%;
+  height: auto;
+  display: block;
+}
+
+.wb-chart-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem 0.9rem;
+  font-size: 0.76rem;
+  color: var(--wb-text-2);
+}
+
+.wb-chart-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.wb-chart-legend-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 999px;
+  display: inline-block;
+}
+
+.wb-chart-empty {
+  margin-top: 0.85rem;
+  padding: 1.5rem;
+  border-radius: 10px;
+  border: 1px dashed var(--wb-border-strong);
+  text-align: center;
+  color: var(--wb-muted);
+  font-size: 0.85rem;
+}
+
 .wb-qi-list {
   display: flex;
   flex-wrap: wrap;

@@ -5,7 +5,7 @@ import type { ReplaySource } from '../workers/duckdb.client';
 
 export type EngineStatus = 'idle' | 'booting' | 'ready' | 'error';
 export type WorkbenchFeature =
-  'data' | 'profile' | 'clean' | 'query' | 'redact' | 'compare' | 'export';
+  'data' | 'profile' | 'clean' | 'charts' | 'query' | 'redact' | 'compare' | 'export';
 
 export interface LoadedTableMeta {
   id: string;

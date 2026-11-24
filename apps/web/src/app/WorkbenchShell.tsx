@@ -36,6 +36,12 @@ import {
   type WorkbenchFeature,
 } from '../store/workspace.store';
 import type { GridColumnMeta, QueryTableResult } from './arrowFormat';
+import {
+  ChartRenderer,
+  type ChartBoxPoint,
+  type ChartCategoryPoint,
+  type ChartScatterPoint,
+} from './ChartRenderer';
 import { DataGrid, type TablePageNav } from './DataGrid';
 import {
   buildCsvExportBytes,
@@ -67,6 +73,8 @@ import { buildSyntheticMessyPayrollCsv } from './sampleDataset';
 import {
   buildArrowTableTypedCastSql,
   buildAttachSql,
+  buildBarChartSql,
+  buildBoxPlotChartSql,
   buildCompareDiffSql,
   buildCompareSummarySql,
   buildCsvRejectCountSql,
@@ -75,15 +83,18 @@ import {
   buildFuzzyDedupeCandidatesSql,
   buildFuzzyDedupeCommitSql,
   buildFuzzyReconcileSql,
+  buildHistogramChartSql,
   buildImportAttachedTableSql,
   buildKAnonymityQuery,
   buildKeysetPageSql,
   buildKeyUniquenessCheckSql,
   buildLazyFileIngestSql,
+  buildLineChartSql,
   buildListAttachedTablesSql,
   buildPivotCardinalitySql,
   buildPivotSql,
   buildPopulateRejectsSql,
+  buildScatterChartSql,
   buildTokenizationKeyMapSql,
   buildUnpivotSql,
   compileCellRowOverlaySql,
@@ -94,6 +105,9 @@ import {
   computeSchemaDiff,
   sanitizeTableName,
   type BlockingMode,
+  type ChartAggFn,
+  type ChartTimeGrain,
+  type ChartType,
   type PivotAggFn,
   type RedactColumnPlan,
 } from './sqlCompiler';
@@ -116,8 +130,9 @@ const FEATURE_TABS: ReadonlyArray<{ id: WorkbenchFeature; label: string }> = [
   { id: 'data', label: 'Data Grid' },
   { id: 'profile', label: 'Profile' },
   { id: 'clean', label: 'Clean' },
+  { id: 'charts', label: 'Charts' },
   { id: 'query', label: 'SQL Query' },
-  { id: 'redact', label: 'Redact (v1)' },
+  { id: 'redact', label: 'Redact' },
   { id: 'compare', label: 'Compare (Diff)' },
   { id: 'export', label: 'Export' },
 ];
@@ -459,6 +474,24 @@ export function WorkbenchShell() {
   const [nlMode, setNlMode] = useState<'local' | 'byo'>('local');
   const [nlExternalResponse, setNlExternalResponse] = useState('');
   const [nlPayloadApproved, setNlPayloadApproved] = useState(false);
+
+  // Charts state
+  const [chartType, setChartType] = useState<ChartType>('bar');
+  const [chartXCol, setChartXCol] = useState<string>('');
+  const [chartYCol, setChartYCol] = useState<string>('');
+  const [chartSeriesCol, setChartSeriesCol] = useState<string>('');
+  const [chartAgg, setChartAgg] = useState<ChartAggFn>('COUNT');
+  const [chartTimeGrain, setChartTimeGrain] = useState<ChartTimeGrain>('none');
+  const [chartBins, setChartBins] = useState<number>(12);
+  const [chartTopN, setChartTopN] = useState<number>(20);
+  const [chartCategoryData, setChartCategoryData] = useState<ChartCategoryPoint[]>([]);
+  const [chartScatterData, setChartScatterData] = useState<ChartScatterPoint[]>([]);
+  const [chartBoxData, setChartBoxData] = useState<ChartBoxPoint[]>([]);
+  const [chartTitle, setChartTitle] = useState<string>('Dataset Chart');
+  const [pinnedReportCharts, setPinnedReportCharts] = useState<
+    Array<{ title: string; svgMarkup: string }>
+  >([]);
+  const [queryViewMode, setQueryViewMode] = useState<'table' | 'chart'>('table');
 
   // Redact state
   const [piiFindings, setPiiFindings] = useState<PiiFinding[]>([]);
@@ -1927,6 +1960,7 @@ export function WorkbenchShell() {
               }))
             : [],
         redactModes: redactPlans,
+        pinnedCharts: pinnedReportCharts,
       });
       triggerBlobDownload(
         `${activeTable.baseAlias}_report.html`,
@@ -2299,6 +2333,123 @@ export function WorkbenchShell() {
         `Unpivoted ${unpivotCols.length} column(s) → ${rowCount.toLocaleString('en-US')} rows.`,
       );
       await refreshMemoryGauge();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setQueryResult(null, msg);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleBuildChart(override?: {
+    type?: ChartType;
+    xCol?: string;
+    yCol?: string;
+  }): Promise<void> {
+    if (!activeTable) return;
+    const effType = override?.type ?? chartType;
+    const xCol = override?.xCol ?? (chartXCol || userColumns[0]?.name || '');
+    const yCol =
+      override?.yCol ?? (chartYCol || userColumns[1]?.name || userColumns[0]?.name || '');
+    if (!xCol) {
+      setStatusNote('Select an X-axis column to build a chart.');
+      return;
+    }
+    setBusy(true, `Aggregating ${effType} chart in DuckDB…`);
+    try {
+      const client = await ensureEngineReady();
+      if (effType === 'scatter') {
+        if (!yCol) {
+          setStatusNote('Select both X and Y numeric columns for a scatter plot.');
+          return;
+        }
+        const sql = buildScatterChartSql({
+          tableAlias: activeTable.alias,
+          xColumn: xCol,
+          yColumn: yCol,
+        });
+        const res = await client.queryRows(sql, 1200);
+        setChartScatterData(
+          res.rows
+            .map((r) => ({ x: Number(r[0]), y: Number(r[1]) }))
+            .filter((p) => Number.isFinite(p.x) && Number.isFinite(p.y)),
+        );
+        setChartCategoryData([]);
+        setChartBoxData([]);
+        setChartTitle(`${yCol} vs ${xCol} (${activeTable.alias})`);
+        setStatusNote(`Plotted ${res.rows.length} scatter points.`);
+        return;
+      }
+
+      if (effType === 'box') {
+        if (!yCol) {
+          setStatusNote('Select a numeric Y column for the Box / Outlier plot.');
+          return;
+        }
+        const sql = buildBoxPlotChartSql({
+          tableAlias: activeTable.alias,
+          xColumn: xCol,
+          yColumn: yCol,
+          topN: chartTopN,
+        });
+        const res = await client.queryRows(sql, 30);
+        const boxes: ChartBoxPoint[] = res.rows.map((r) => ({
+          label: String(r[0] ?? '(null)'),
+          min: Number(r[1] ?? 0),
+          q1: Number(r[2] ?? 0),
+          median: Number(r[3] ?? 0),
+          q3: Number(r[4] ?? 0),
+          max: Number(r[5] ?? 0),
+          count: Number(r[6] ?? 0),
+        }));
+        setChartBoxData(boxes);
+        setChartCategoryData([]);
+        setChartScatterData([]);
+        setChartTitle(`Outliers & Quartiles: ${yCol} by ${xCol}`);
+        setStatusNote(`Rendered Box/Outlier summary (${boxes.length} groups).`);
+        return;
+      }
+
+      const sql =
+        effType === 'histogram'
+          ? buildHistogramChartSql({
+              tableAlias: activeTable.alias,
+              column: xCol,
+              bins: chartBins,
+            })
+          : effType === 'line'
+            ? buildLineChartSql({
+                tableAlias: activeTable.alias,
+                xColumn: xCol,
+                yColumn: yCol,
+                aggFn: chartAgg,
+                timeGrain: chartTimeGrain,
+              })
+            : buildBarChartSql({
+                tableAlias: activeTable.alias,
+                xColumn: xCol,
+                yColumn: yCol,
+                seriesColumn: chartSeriesCol || undefined,
+                aggFn: chartAgg,
+                topN: chartTopN,
+              });
+      const res = await client.queryRows(sql, 500);
+      const points: ChartCategoryPoint[] = res.rows.map((r) => ({
+        label: String(r[0] ?? '(null)'),
+        value: Number(r[1] ?? 0),
+        series: effType === 'bar' && chartSeriesCol ? String(r[2] ?? '(null)') : undefined,
+        binMin: effType === 'histogram' && r[2] !== undefined ? Number(r[2]) : undefined,
+        binMax: effType === 'histogram' && r[3] !== undefined ? Number(r[3]) : undefined,
+      }));
+      setChartCategoryData(points);
+      setChartScatterData([]);
+      setChartBoxData([]);
+      setChartTitle(
+        effType === 'histogram'
+          ? `Distribution of ${xCol} (${chartBins} bins)`
+          : `${chartAgg === 'COUNT' ? 'COUNT(*)' : `${chartAgg}(${yCol})`} by ${xCol}`,
+      );
+      setStatusNote(`Rendered ${effType} chart (${points.length} groups/bins).`);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       setQueryResult(null, msg);
@@ -2937,6 +3088,7 @@ export function WorkbenchShell() {
             <section
               className={
                 activeFeature === 'profile' ||
+                activeFeature === 'charts' ||
                 activeFeature === 'redact' ||
                 activeFeature === 'export'
                   ? 'wb-stage-card wb-stage-full'
@@ -3037,7 +3189,34 @@ export function WorkbenchShell() {
                                     <strong>{colName}</strong>
                                   </td>
                                   <td>
-                                    <ProfileSparkline values={sparkVals} label={colName} />
+                                    <div
+                                      style={{
+                                        display: 'flex',
+                                        alignItems: 'center',
+                                        gap: '0.4rem',
+                                      }}
+                                    >
+                                      <ProfileSparkline values={sparkVals} label={colName} />
+                                      <button
+                                        type="button"
+                                        className="wb-btn-mini"
+                                        title={`Plot ${colName} in Charts`}
+                                        onClick={() => {
+                                          const colType = String(row[1] ?? '');
+                                          const nextType: ChartType =
+                                            /int|float|double|decimal|bigint/i.test(colType)
+                                              ? 'histogram'
+                                              : 'bar';
+                                          setChartType(nextType);
+                                          setChartXCol(colName);
+                                          setChartAgg('COUNT');
+                                          navigateFeature('charts');
+                                          void handleBuildChart({ type: nextType, xCol: colName });
+                                        }}
+                                      >
+                                        Plot
+                                      </button>
+                                    </div>
                                   </td>
                                   <td className="wb-mono">{row[1] ?? ''}</td>
                                   <td className="wb-mono">{row[2] ?? ''}</td>
@@ -3713,6 +3892,186 @@ export function WorkbenchShell() {
                 </div>
               ) : null}
 
+              {activeFeature === 'charts' ? (
+                <div>
+                  <div className="wb-stage-header">
+                    <div>
+                      <h1>Charts &amp; Visual Exploration</h1>
+                      <p>
+                        Aggregated directly in DuckDB-WASM (never plotting 100k+ raw rows in the
+                        DOM). Click any bar or point to filter in Clean.
+                      </p>
+                    </div>
+                  </div>
+
+                  {!activeTable ? (
+                    <p className="wb-empty-note">Load a table first to build charts.</p>
+                  ) : (
+                    <>
+                      <div className="wb-form-row">
+                        <label>
+                          Chart Type
+                          <select
+                            value={chartType}
+                            onChange={(e) => setChartType(e.target.value as ChartType)}
+                          >
+                            <option value="bar">Bar (Top-N)</option>
+                            <option value="histogram">Histogram (Distribution)</option>
+                            <option value="line">Line / Time Series</option>
+                            <option value="scatter">Scatter (X vs Y)</option>
+                            <option value="box">Box / Outlier Summary</option>
+                          </select>
+                        </label>
+                        <label>
+                          {chartType === 'histogram' ? 'Numeric Column' : 'X Axis / Category'}
+                          <select
+                            value={chartXCol || userColumns[0]?.name || ''}
+                            onChange={(e) => setChartXCol(e.target.value)}
+                          >
+                            {userColumns.map((c) => (
+                              <option key={c.name} value={c.name}>
+                                {c.name} ({c.type})
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        {chartType !== 'histogram' ? (
+                          <label>
+                            Y Axis / Value
+                            <select
+                              value={
+                                chartYCol || userColumns[1]?.name || userColumns[0]?.name || ''
+                              }
+                              onChange={(e) => setChartYCol(e.target.value)}
+                            >
+                              {userColumns.map((c) => (
+                                <option key={c.name} value={c.name}>
+                                  {c.name} ({c.type})
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                        ) : null}
+                        {chartType === 'bar' || chartType === 'line' ? (
+                          <label>
+                            Aggregation
+                            <select
+                              value={chartAgg}
+                              onChange={(e) => setChartAgg(e.target.value as ChartAggFn)}
+                            >
+                              <option value="COUNT">COUNT</option>
+                              <option value="SUM">SUM</option>
+                              <option value="AVG">AVG</option>
+                              <option value="MIN">MIN</option>
+                              <option value="MAX">MAX</option>
+                            </select>
+                          </label>
+                        ) : null}
+                        {chartType === 'line' ? (
+                          <label>
+                            Time Grain
+                            <select
+                              value={chartTimeGrain}
+                              onChange={(e) => setChartTimeGrain(e.target.value as ChartTimeGrain)}
+                            >
+                              <option value="none">Raw / Exact</option>
+                              <option value="day">Day</option>
+                              <option value="week">Week</option>
+                              <option value="month">Month</option>
+                            </select>
+                          </label>
+                        ) : null}
+                        {chartType === 'histogram' ? (
+                          <label>
+                            Bins
+                            <input
+                              type="number"
+                              min={3}
+                              max={40}
+                              value={chartBins}
+                              onChange={(e) => setChartBins(Number(e.target.value) || 12)}
+                            />
+                          </label>
+                        ) : null}
+                        {chartType === 'bar' ? (
+                          <>
+                            <label>
+                              Group / Series Split
+                              <select
+                                value={chartSeriesCol}
+                                onChange={(e) => setChartSeriesCol(e.target.value)}
+                              >
+                                <option value="">None</option>
+                                {userColumns.map((c) => (
+                                  <option key={c.name} value={c.name}>
+                                    {c.name}
+                                  </option>
+                                ))}
+                              </select>
+                            </label>
+                            <label>
+                              Top-N Cap
+                              <input
+                                type="number"
+                                min={2}
+                                max={60}
+                                value={chartTopN}
+                                onChange={(e) => setChartTopN(Number(e.target.value) || 20)}
+                              />
+                            </label>
+                          </>
+                        ) : null}
+                        <button
+                          type="button"
+                          className="wb-btn wb-btn-primary"
+                          disabled={isBusy}
+                          onClick={() => void handleBuildChart()}
+                        >
+                          Render Chart
+                        </button>
+                      </div>
+
+                      <ChartRenderer
+                        chartType={chartType}
+                        title={chartTitle}
+                        xLabel={chartXCol || userColumns[0]?.name || 'X'}
+                        yLabel={
+                          chartType === 'histogram'
+                            ? 'Count'
+                            : chartType === 'scatter' || chartType === 'box'
+                              ? chartYCol || userColumns[1]?.name || 'Y'
+                              : `${chartAgg}(${chartYCol || '*'})`
+                        }
+                        categoryData={chartCategoryData}
+                        scatterData={chartScatterData}
+                        boxData={chartBoxData}
+                        onSelectCategory={(pt) => {
+                          const xCol = chartXCol || userColumns[0]?.name || '';
+                          if (!xCol) return;
+                          setCleanOp('filter');
+                          setCleanPrimaryCol(xCol);
+                          if (pt.binMin !== undefined) {
+                            setCleanFilterOp('gt');
+                            setCleanFilterVal(String(pt.binMin));
+                          } else {
+                            setCleanFilterOp('eq');
+                            setCleanFilterVal(pt.label === '(null)' ? '' : pt.label);
+                          }
+                          navigateFeature('clean');
+                          setStatusNote(
+                            `Staged Clean filter for ${xCol} = "${pt.label}". Click Apply Clean Step to commit.`,
+                          );
+                        }}
+                        onPinReport={(t, svgMarkup) => {
+                          setPinnedReportCharts((prev) => [...prev, { title: t, svgMarkup }]);
+                          setStatusNote(`Pinned "${t}" to Self-Contained HTML Report.`);
+                        }}
+                      />
+                    </>
+                  )}
+                </div>
+              ) : null}
+
               {activeFeature === 'query' ? (
                 <div>
                   <div className="wb-stage-header">
@@ -3727,6 +4086,22 @@ export function WorkbenchShell() {
                       <span className={sqlSafety.ok ? 'wb-tag wb-tag-ok' : 'wb-tag wb-tag-warn'}>
                         {sqlSafety.ok ? 'Read-Only Safe SQL' : `Guarded: ${sqlSafety.reasons[0]}`}
                       </span>
+                      <div className="wb-pill-row">
+                        <button
+                          type="button"
+                          className={queryViewMode === 'table' ? 'wb-pill active' : 'wb-pill'}
+                          onClick={() => setQueryViewMode('table')}
+                        >
+                          Table
+                        </button>
+                        <button
+                          type="button"
+                          className={queryViewMode === 'chart' ? 'wb-pill active' : 'wb-pill'}
+                          onClick={() => setQueryViewMode('chart')}
+                        >
+                          Chart
+                        </button>
+                      </div>
                       <button
                         type="button"
                         className="wb-btn wb-btn-primary"
@@ -3784,6 +4159,24 @@ export function WorkbenchShell() {
                     onChange={setSqlDraft}
                     onRun={() => void handleRunSql()}
                   />
+
+                  {queryViewMode === 'chart' && queryResult ? (
+                    <ChartRenderer
+                      chartType="bar"
+                      title="SQL Query Result Chart"
+                      xLabel={queryResult.columns[0]?.name ?? 'Category'}
+                      yLabel={queryResult.columns[1]?.name ?? 'Value'}
+                      categoryData={queryResult.rows.slice(0, 30).map((r) => ({
+                        label: String(r[0] ?? '(null)'),
+                        value: Number(r[1] ?? 0) || 0,
+                      }))}
+                      scatterData={[]}
+                      onPinReport={(t, svgMarkup) => {
+                        setPinnedReportCharts((prev) => [...prev, { title: t, svgMarkup }]);
+                        setStatusNote(`Pinned "${t}" to Self-Contained HTML Report.`);
+                      }}
+                    />
+                  ) : null}
 
                   {activeTable ? (
                     <div className="wb-nl-card">
@@ -4626,7 +5019,7 @@ export function WorkbenchShell() {
 
           {(activeFeature === 'data' && tables.length > 0) ||
           activeFeature === 'clean' ||
-          activeFeature === 'query' ||
+          (activeFeature === 'query' && queryViewMode === 'table') ||
           activeFeature === 'compare' ? (
             <DataGrid
               title={activeTable ? `Grid · ${activeTable.alias}` : 'Data Grid'}

@@ -72,7 +72,7 @@ async function runM3Browser(name, browserType) {
       .waitFor({ timeout: 15000 });
 
     // (1) Redact workflow: Scan PII -> Mask + Salted SHA-256 -> Apply -> k-Anonymity -> Reports
-    await page.getByRole('tab', { name: 'Redact (v1)' }).click();
+    await page.getByRole('tab', { name: 'Redact' }).click();
     await page.getByRole('button', { name: 'Scan PII Columns' }).click();
     await page.getByLabel('Redaction mode for email').selectOption('hash_sha256');
     await page.getByRole('button', { name: 'Apply Redaction' }).click();

@@ -248,6 +248,11 @@ export interface HtmlReportIssueSummary {
   message: string;
 }
 
+export interface HtmlReportChartSummary {
+  title: string;
+  svgMarkup: string;
+}
+
 export interface HtmlReportOptions {
   datasetName: string;
   activeAlias: string;
@@ -257,6 +262,7 @@ export interface HtmlReportOptions {
   steps: readonly HtmlReportStepSummary[];
   issues?: readonly HtmlReportIssueSummary[];
   redactModes?: Record<string, string>;
+  pinnedCharts?: readonly HtmlReportChartSummary[];
   generatedAtIso?: string;
 }
 
@@ -305,6 +311,19 @@ export function buildSelfContainedHtmlReport(opts: HtmlReportOptions): Uint8Arra
           .join('')}</tr>`,
     )
     .join('\n');
+
+  const chartsHtml =
+    opts.pinnedCharts && opts.pinnedCharts.length > 0
+      ? `<section class="card">
+      <h2>Pinned Charts</h2>
+      ${opts.pinnedCharts
+        .map(
+          (ch) =>
+            `<div style="margin-bottom:1rem;"><strong>${escapeHtml(ch.title)}</strong><div>${ch.svgMarkup}</div></div>`,
+        )
+        .join('\n')}
+    </section>`
+      : '';
 
   const html = `<!DOCTYPE html>
 <html lang="en">
@@ -364,6 +383,7 @@ export function buildSelfContainedHtmlReport(opts: HtmlReportOptions): Uint8Arra
       <h2>Reproducible Recipe Pipeline</h2>
       ${stepsHtml}
     </section>
+    ${chartsHtml}
     <section class="card">
       <h2>Data Preview (First ${sampleRows.length} rows)</h2>
       <div class="table-scroll">

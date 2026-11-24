@@ -1141,3 +1141,159 @@ export function buildTokenizationKeyMapSql(
   );
   return `${branches.join('\nUNION ALL\n')};`;
 }
+
+export type ChartType = 'bar' | 'line' | 'histogram' | 'scatter' | 'box';
+export type ChartAggFn = 'COUNT' | 'SUM' | 'AVG' | 'MIN' | 'MAX';
+export type ChartTimeGrain = 'none' | 'day' | 'week' | 'month';
+
+function chartAggExpr(aggFn: ChartAggFn, yColumn?: string): string {
+  if (aggFn === 'COUNT' || !yColumn) {
+    return 'count(*)::DOUBLE';
+  }
+  const numExpr = `try_cast(${ident(yColumn)} AS DOUBLE)`;
+  if (aggFn === 'SUM') return `round(coalesce(sum(${numExpr}), 0), 4)`;
+  if (aggFn === 'AVG') return `round(coalesce(avg(${numExpr}), 0), 4)`;
+  if (aggFn === 'MIN') return `round(min(${numExpr}), 4)`;
+  return `round(max(${numExpr}), 4)`;
+}
+
+/** Build deterministic grouped bar chart SQL with top-N cap and optional series split. */
+export function buildBarChartSql(opts: {
+  tableAlias: string;
+  xColumn: string;
+  yColumn?: string;
+  seriesColumn?: string;
+  aggFn: ChartAggFn;
+  topN?: number;
+}): string {
+  const topN = Math.max(2, Math.min(60, Math.round(opts.topN ?? 25)));
+  const valExpr = chartAggExpr(opts.aggFn, opts.yColumn);
+  if (opts.seriesColumn) {
+    return `SELECT
+  coalesce(${ident(opts.xColumn)}::VARCHAR, '(null)') AS "label",
+  ${valExpr} AS "value",
+  coalesce(${ident(opts.seriesColumn)}::VARCHAR, '(null)') AS "series"
+FROM ${ident(opts.tableAlias)}
+GROUP BY 1, 3
+ORDER BY "value" DESC NULLS LAST, "label" ASC
+LIMIT ${topN};`;
+  }
+  return `SELECT
+  coalesce(${ident(opts.xColumn)}::VARCHAR, '(null)') AS "label",
+  ${valExpr} AS "value"
+FROM ${ident(opts.tableAlias)}
+GROUP BY 1
+ORDER BY "value" DESC NULLS LAST, "label" ASC
+LIMIT ${topN};`;
+}
+
+/** Build deterministic numeric histogram SQL using width_bucket over min..max. */
+export function buildHistogramChartSql(opts: {
+  tableAlias: string;
+  column: string;
+  bins?: number;
+}): string {
+  const bins = Math.max(3, Math.min(40, Math.round(opts.bins ?? 12)));
+  const colExpr = `try_cast(${ident(opts.column)} AS DOUBLE)`;
+  return `WITH _vals AS (
+  SELECT ${colExpr} AS v
+  FROM ${ident(opts.tableAlias)}
+  WHERE ${colExpr} IS NOT NULL AND isfinite(${colExpr})
+),
+_bounds AS (
+  SELECT min(v) AS lo, max(v) AS hi
+  FROM _vals
+),
+_binned AS (
+  SELECT
+    CASE
+      WHEN b.hi = b.lo THEN 1
+      ELSE least(${bins}, greatest(1, width_bucket(v.v, b.lo, b.hi + 1e-9, ${bins})))
+    END AS bin_idx,
+    b.lo,
+    b.hi
+  FROM _vals v
+  CROSS JOIN _bounds b
+  WHERE b.lo IS NOT NULL
+)
+SELECT
+  concat(
+    round(lo + ((bin_idx - 1) * greatest(hi - lo, 1e-9) / ${bins}), 2)::VARCHAR,
+    ' – ',
+    round(lo + (bin_idx * greatest(hi - lo, 1e-9) / ${bins}), 2)::VARCHAR
+  ) AS "label",
+  count(*)::DOUBLE AS "value",
+  round(lo + ((bin_idx - 1) * greatest(hi - lo, 1e-9) / ${bins}), 4) AS "bin_min",
+  round(lo + (bin_idx * greatest(hi - lo, 1e-9) / ${bins}), 4) AS "bin_max"
+FROM _binned
+GROUP BY bin_idx, lo, hi
+ORDER BY bin_idx ASC;`;
+}
+
+/** Build deterministic line/time-series chart SQL. */
+export function buildLineChartSql(opts: {
+  tableAlias: string;
+  xColumn: string;
+  yColumn?: string;
+  aggFn: ChartAggFn;
+  timeGrain?: ChartTimeGrain;
+  limit?: number;
+}): string {
+  const limit = Math.max(5, Math.min(500, Math.round(opts.limit ?? 200)));
+  const grain = opts.timeGrain ?? 'none';
+  const xExpr =
+    grain === 'none'
+      ? `coalesce(${ident(opts.xColumn)}::VARCHAR, '(null)')`
+      : `coalesce(strftime(date_trunc(${lit(grain)}, try_cast(${ident(opts.xColumn)} AS TIMESTAMP)), '%Y-%m-%d'), '(null)')`;
+  const valExpr = chartAggExpr(opts.aggFn, opts.yColumn);
+  return `SELECT
+  ${xExpr} AS "label",
+  ${valExpr} AS "value"
+FROM ${ident(opts.tableAlias)}
+GROUP BY 1
+ORDER BY 1 ASC
+LIMIT ${limit};`;
+}
+
+/** Build bounded scatter-plot sample SQL over two numeric columns. */
+export function buildScatterChartSql(opts: {
+  tableAlias: string;
+  xColumn: string;
+  yColumn: string;
+  limit?: number;
+}): string {
+  const limit = Math.max(10, Math.min(2500, Math.round(opts.limit ?? 1200)));
+  const xExpr = `try_cast(${ident(opts.xColumn)} AS DOUBLE)`;
+  const yExpr = `try_cast(${ident(opts.yColumn)} AS DOUBLE)`;
+  return `SELECT
+  ${xExpr} AS "x",
+  ${yExpr} AS "y"
+FROM ${ident(opts.tableAlias)}
+WHERE ${xExpr} IS NOT NULL AND ${yExpr} IS NOT NULL
+  AND isfinite(${xExpr}) AND isfinite(${yExpr})
+LIMIT ${limit};`;
+}
+
+/** Build deterministic Box/Outlier summary SQL (min, Q1, median, Q3, max) by category. */
+export function buildBoxPlotChartSql(opts: {
+  tableAlias: string;
+  xColumn: string;
+  yColumn: string;
+  topN?: number;
+}): string {
+  const topN = Math.max(2, Math.min(30, Math.round(opts.topN ?? 15)));
+  const yExpr = `try_cast(${ident(opts.yColumn)} AS DOUBLE)`;
+  return `SELECT
+  coalesce(${ident(opts.xColumn)}::VARCHAR, '(null)') AS "label",
+  round(min(${yExpr}), 4) AS "min_val",
+  round(quantile_cont(${yExpr}, 0.25), 4) AS "q1_val",
+  round(quantile_cont(${yExpr}, 0.50), 4) AS "median_val",
+  round(quantile_cont(${yExpr}, 0.75), 4) AS "q3_val",
+  round(max(${yExpr}), 4) AS "max_val",
+  count(*)::BIGINT AS "row_count"
+FROM ${ident(opts.tableAlias)}
+WHERE ${yExpr} IS NOT NULL AND isfinite(${yExpr})
+GROUP BY 1
+ORDER BY "median_val" DESC NULLS LAST, "label" ASC
+LIMIT ${topN};`;
+}
