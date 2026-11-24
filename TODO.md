@@ -96,7 +96,7 @@ All Milestone S spikes (S1–S9) plus replacement verification checks (R1–R3) 
 
 ## Post-v1 Backlog *(Explicitly Deferred)*
 
-- [ ] **v1.1 Headline Workflow — Compare (Diff):** Key picker + uniqueness check, `FULL OUTER JOIN` + `IS DISTINCT FROM` added/removed/changed/unchanged grid + schema diff + CSV/XLSX diff export (`⏱3d`)
+- [x] **v1.1 Headline Workflow — Compare (Diff):** Key picker + uniqueness check, `FULL OUTER JOIN` + `IS DISTINCT FROM` added/removed/changed/unchanged grid + schema diff + CSV/XLSX diff export (`⏱3d`)
 - [ ] **Cell/row editing (formerly M2.5):** overlay keyed by `__rid` + fractional `ord DOUBLE` ordering + keyset grid paging + share-link exclusion
 - [ ] **Fuzzy Reconcile & Fuzzy Dedupe** with blocking, tolerance rules, and review queue
 - [ ] **Pivot / Unpivot** UI step (with column-cardinality cap)

@@ -34,7 +34,7 @@ import {
   type LoadedTableMeta,
   type WorkbenchFeature,
 } from '../store/workspace.store';
-import type { QueryTableResult } from './arrowFormat';
+import type { GridColumnMeta, QueryTableResult } from './arrowFormat';
 import { DataGrid, type TablePageNav } from './DataGrid';
 import {
   buildCsvExportBytes,
@@ -57,15 +57,19 @@ import { ProfileSparkline } from './ProfileSparkline';
 import { buildSyntheticMessyPayrollCsv } from './sampleDataset';
 import {
   buildArrowTableTypedCastSql,
+  buildCompareDiffSql,
+  buildCompareSummarySql,
   buildCsvRejectCountSql,
   buildCsvTypedIngestSql,
   buildKAnonymityQuery,
+  buildKeyUniquenessCheckSql,
   buildLazyFileIngestSql,
   buildPopulateRejectsSql,
   compileCleanStepSql,
   compileFullRecipeSql,
   compileLowercaseColumnSql,
   compileRedactViewSql,
+  computeSchemaDiff,
   sanitizeTableName,
   type RedactColumnPlan,
 } from './sqlCompiler';
@@ -90,6 +94,7 @@ const FEATURE_TABS: ReadonlyArray<{ id: WorkbenchFeature; label: string }> = [
   { id: 'clean', label: 'Clean' },
   { id: 'query', label: 'SQL Query' },
   { id: 'redact', label: 'Redact (v1)' },
+  { id: 'compare', label: 'Compare (Diff)' },
   { id: 'export', label: 'Export' },
 ];
 
@@ -420,6 +425,23 @@ export function WorkbenchShell() {
   const [kAnonResult, setKAnonResult] = useState<QueryTableResult | null>(null);
   const [lastRedactTimestamp, setLastRedactTimestamp] = useState<number | null>(null);
   const [neutralizeFormulas, setNeutralizeFormulas] = useState(true);
+
+  // Compare (Diff) v1.1 state
+  const [compareLeftAlias, setCompareLeftAlias] = useState<string>('');
+  const [compareRightAlias, setCompareRightAlias] = useState<string>('');
+  const [compareKeys, setCompareKeys] = useState<string[]>([]);
+  const [compareStatusFilter, setCompareStatusFilter] = useState<
+    'all' | 'added' | 'removed' | 'changed' | 'unchanged'
+  >('all');
+  const [compareSummary, setCompareSummary] = useState<{
+    added: number;
+    removed: number;
+    changed: number;
+    unchanged: number;
+    leftDuplicates: number;
+    rightDuplicates: number;
+  } | null>(null);
+  const [compareLastResult, setCompareLastResult] = useState<QueryTableResult | null>(null);
 
   const activeTable: LoadedTableMeta | undefined =
     tables.find((t) => t.id === selectedTableId) ?? tables[0];
@@ -1617,6 +1639,134 @@ export function WorkbenchShell() {
     }
   }
 
+  const compareCandidates = (() => {
+    const out: Array<{ alias: string; columns: GridColumnMeta[] }> = [];
+    const seen = new Set<string>();
+    for (const t of tables) {
+      if (!seen.has(t.baseAlias)) {
+        seen.add(t.baseAlias);
+        out.push({ alias: t.baseAlias, columns: t.columns });
+      }
+      if (!seen.has(t.alias)) {
+        seen.add(t.alias);
+        out.push({ alias: t.alias, columns: t.columns });
+      }
+    }
+    for (const snap of stepSnapshots) {
+      if (!seen.has(snap.targetAlias)) {
+        seen.add(snap.targetAlias);
+        out.push({ alias: snap.targetAlias, columns: snap.columns });
+      }
+    }
+    return out;
+  })();
+
+  const resolvedLeftAlias =
+    compareLeftAlias && compareCandidates.some((c) => c.alias === compareLeftAlias)
+      ? compareLeftAlias
+      : (compareCandidates[0]?.alias ?? '');
+  const resolvedRightAlias =
+    compareRightAlias && compareCandidates.some((c) => c.alias === compareRightAlias)
+      ? compareRightAlias
+      : (compareCandidates[1]?.alias ?? compareCandidates[0]?.alias ?? '');
+  const leftSchemaCols =
+    compareCandidates.find((c) => c.alias === resolvedLeftAlias)?.columns ?? [];
+  const rightSchemaCols =
+    compareCandidates.find((c) => c.alias === resolvedRightAlias)?.columns ?? [];
+  const compareSchemaDiff = computeSchemaDiff(leftSchemaCols, rightSchemaCols);
+
+  async function handleRunCompare(
+    statusOverride?: 'all' | 'added' | 'removed' | 'changed' | 'unchanged',
+  ): Promise<void> {
+    if (!resolvedLeftAlias || !resolvedRightAlias) return;
+    const keys =
+      compareKeys.length > 0
+        ? compareKeys.filter((k) => compareSchemaDiff.shared.includes(k))
+        : compareSchemaDiff.shared[0]
+          ? [compareSchemaDiff.shared[0]]
+          : [];
+    if (keys.length === 0) {
+      setStatusNote('Select at least one shared key column to run Compare (Diff).');
+      return;
+    }
+
+    const activeFilter = statusOverride ?? compareStatusFilter;
+    if (statusOverride) setCompareStatusFilter(statusOverride);
+    const compareColumns = compareSchemaDiff.shared.filter((c) => !keys.includes(c));
+
+    setBusy(true, `Comparing ${resolvedLeftAlias} vs ${resolvedRightAlias}…`);
+    try {
+      const client = await ensureEngineReady();
+      const [leftUniq, rightUniq, sumRes, diffRes] = await Promise.all([
+        client.queryRows(buildKeyUniquenessCheckSql(resolvedLeftAlias, keys), 1),
+        client.queryRows(buildKeyUniquenessCheckSql(resolvedRightAlias, keys), 1),
+        client.queryRows(
+          buildCompareSummarySql({
+            leftAlias: resolvedLeftAlias,
+            rightAlias: resolvedRightAlias,
+            keyColumns: keys,
+            compareColumns,
+          }),
+          1,
+        ),
+        client.queryRows(
+          buildCompareDiffSql({
+            leftAlias: resolvedLeftAlias,
+            rightAlias: resolvedRightAlias,
+            keyColumns: keys,
+            compareColumns,
+            statusFilter: activeFilter,
+          }),
+          2500,
+        ),
+      ]);
+
+      const leftDuplicates = Number(leftUniq.rows[0]?.[1] ?? 0);
+      const rightDuplicates = Number(rightUniq.rows[0]?.[1] ?? 0);
+      const summary = {
+        added: Number(sumRes.rows[0]?.[0] ?? 0),
+        removed: Number(sumRes.rows[0]?.[1] ?? 0),
+        changed: Number(sumRes.rows[0]?.[2] ?? 0),
+        unchanged: Number(sumRes.rows[0]?.[3] ?? 0),
+        leftDuplicates,
+        rightDuplicates,
+      };
+      setCompareSummary(summary);
+      setCompareLastResult(diffRes);
+      setGridPageNav(null);
+      setQueryResult(diffRes, null);
+      setStatusNote(
+        `Diff (${resolvedLeftAlias} vs ${resolvedRightAlias}): ${summary.changed} changed, ${summary.added} added, ${summary.removed} removed, ${summary.unchanged} unchanged.`,
+      );
+      await refreshMemoryGauge();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setQueryResult(null, msg);
+      setStatusNote(`Compare failed: ${msg}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function handleExportDiff(format: 'csv' | 'xlsx'): void {
+    if (!compareLastResult) return;
+    const bytes =
+      format === 'csv'
+        ? buildCsvExportBytes(compareLastResult.columns, compareLastResult.rows, neutralizeFormulas)
+        : buildXlsxExportBytes(
+            compareLastResult.columns,
+            compareLastResult.rows,
+            neutralizeFormulas,
+          );
+    triggerBlobDownload(
+      `diff_${resolvedLeftAlias}_vs_${resolvedRightAlias}.${format}`,
+      bytes,
+      format === 'csv'
+        ? 'text/csv;charset=utf-8'
+        : 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    );
+  }
+
   async function handleMoveHead(nextHead: number): Promise<void> {
     setHead(nextHead);
     const state = useWorkspaceStore.getState();
@@ -1984,7 +2134,7 @@ export function WorkbenchShell() {
           ) : null}
 
           <div className="wb-explorer-foot">
-            <small>Compare (Diff) scheduled for v1.1 per W0 Decision D4.</small>
+            <small>Compare (Diff) v1.1 active — FULL OUTER JOIN + IS DISTINCT FROM.</small>
           </div>
         </aside>
 
@@ -2841,6 +2991,178 @@ export function WorkbenchShell() {
                 </div>
               ) : null}
 
+              {activeFeature === 'compare' ? (
+                <div>
+                  <div className="wb-stage-header">
+                    <div>
+                      <h1>Compare (Diff) — v1.1 Headline Workflow</h1>
+                      <p>
+                        Key uniqueness check + deterministic <code>FULL OUTER JOIN</code> &amp;{' '}
+                        <code>IS DISTINCT FROM</code> diffing with schema diff and CSV/XLSX export.
+                      </p>
+                    </div>
+                    <div className="wb-review-actions">
+                      <button
+                        type="button"
+                        className="wb-btn wb-btn-outline"
+                        disabled={!compareLastResult || isBusy}
+                        onClick={() => handleExportDiff('csv')}
+                      >
+                        <IconDownload className="wb-ico-xs" /> Export Diff CSV
+                      </button>
+                      <button
+                        type="button"
+                        className="wb-btn wb-btn-outline"
+                        disabled={!compareLastResult || isBusy}
+                        onClick={() => handleExportDiff('xlsx')}
+                      >
+                        <IconDownload className="wb-ico-xs" /> Export Diff XLSX
+                      </button>
+                      <button
+                        type="button"
+                        className="wb-btn wb-btn-primary"
+                        disabled={compareCandidates.length === 0 || isBusy}
+                        onClick={() => void handleRunCompare()}
+                      >
+                        Run Compare (Diff)
+                      </button>
+                    </div>
+                  </div>
+
+                  {compareCandidates.length === 0 ? (
+                    <p className="wb-empty-note">
+                      Load at least one dataset (or create a cleaned/redacted step) to compare
+                      tables.
+                    </p>
+                  ) : (
+                    <div className="wb-clean-builder">
+                      <div className="wb-form-row">
+                        <label>
+                          Baseline (Left)
+                          <select
+                            aria-label="Compare baseline table"
+                            value={resolvedLeftAlias}
+                            onChange={(e) => setCompareLeftAlias(e.target.value)}
+                          >
+                            {compareCandidates.map((c) => (
+                              <option key={c.alias} value={c.alias}>
+                                {c.alias}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        <label>
+                          Target (Right)
+                          <select
+                            aria-label="Compare target table"
+                            value={resolvedRightAlias}
+                            onChange={(e) => setCompareRightAlias(e.target.value)}
+                          >
+                            {compareCandidates.map((c) => (
+                              <option key={c.alias} value={c.alias}>
+                                {c.alias}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                      </div>
+
+                      <div className="wb-qi-list">
+                        <span className="wb-muted">Join Keys:</span>
+                        {compareSchemaDiff.shared.map((colName) => {
+                          const checked =
+                            compareKeys.length > 0
+                              ? compareKeys.includes(colName)
+                              : colName === compareSchemaDiff.shared[0];
+                          return (
+                            <label key={colName} className="wb-check-inline">
+                              <input
+                                type="checkbox"
+                                checked={checked}
+                                onChange={(e) => {
+                                  const base =
+                                    compareKeys.length > 0
+                                      ? compareKeys
+                                      : compareSchemaDiff.shared[0]
+                                        ? [compareSchemaDiff.shared[0]]
+                                        : [];
+                                  setCompareKeys(
+                                    e.target.checked
+                                      ? [...new Set([...base, colName])]
+                                      : base.filter((k) => k !== colName),
+                                  );
+                                }}
+                              />
+                              {colName}
+                            </label>
+                          );
+                        })}
+                      </div>
+
+                      <div className="wb-pill-row">
+                        <span className="wb-tag">
+                          Shared cols: {compareSchemaDiff.shared.length}
+                        </span>
+                        {compareSchemaDiff.addedInRight.length > 0 ? (
+                          <span className="wb-tag wb-tag-ok">
+                            + Added cols: {compareSchemaDiff.addedInRight.join(', ')}
+                          </span>
+                        ) : null}
+                        {compareSchemaDiff.removedFromLeft.length > 0 ? (
+                          <span className="wb-tag wb-tag-warn">
+                            - Removed cols: {compareSchemaDiff.removedFromLeft.join(', ')}
+                          </span>
+                        ) : null}
+                        {compareSchemaDiff.typeChanges.length > 0 ? (
+                          <span className="wb-tag wb-tag-warn">
+                            Type drift:{' '}
+                            {compareSchemaDiff.typeChanges
+                              .map((t) => `${t.column} (${t.leftType}→${t.rightType})`)
+                              .join(', ')}
+                          </span>
+                        ) : null}
+                      </div>
+
+                      {compareSummary ? (
+                        <div className="wb-pill-row">
+                          {(
+                            [
+                              ['all', 'All'],
+                              ['changed', `Changed (${compareSummary.changed})`],
+                              ['added', `Added (${compareSummary.added})`],
+                              ['removed', `Removed (${compareSummary.removed})`],
+                              ['unchanged', `Unchanged (${compareSummary.unchanged})`],
+                            ] as const
+                          ).map(([status, label]) => (
+                            <button
+                              key={status}
+                              type="button"
+                              className={
+                                compareStatusFilter === status ? 'wb-pill active' : 'wb-pill'
+                              }
+                              onClick={() => void handleRunCompare(status)}
+                            >
+                              {label}
+                            </button>
+                          ))}
+                          <span
+                            className={
+                              compareSummary.leftDuplicates === 0 &&
+                              compareSummary.rightDuplicates === 0
+                                ? 'wb-tag wb-tag-ok'
+                                : 'wb-tag wb-tag-warn'
+                            }
+                          >
+                            Key uniqueness: L {compareSummary.leftDuplicates} dup / R{' '}
+                            {compareSummary.rightDuplicates} dup
+                          </span>
+                        </div>
+                      ) : null}
+                    </div>
+                  )}
+                </div>
+              ) : null}
+
               {activeFeature === 'export' ? (
                 <div>
                   <div className="wb-stage-header">
@@ -2959,7 +3281,8 @@ export function WorkbenchShell() {
 
           {(activeFeature === 'data' && tables.length > 0) ||
           activeFeature === 'clean' ||
-          activeFeature === 'query' ? (
+          activeFeature === 'query' ||
+          activeFeature === 'compare' ? (
             <DataGrid
               title={activeTable ? `Grid · ${activeTable.alias}` : 'Data Grid'}
               result={queryResult}

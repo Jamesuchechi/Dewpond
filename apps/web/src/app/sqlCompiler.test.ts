@@ -1,12 +1,16 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildArrowTableTypedCastSql,
+  buildCompareDiffSql,
+  buildCompareSummarySql,
   buildCsvTypedIngestSql,
   buildKAnonymityQuery,
+  buildKeyUniquenessCheckSql,
   buildLazyFileIngestSql,
   buildPopulateRejectsSql,
   compileCleanStepSql,
   compileRedactViewSql,
+  computeSchemaDiff,
   sanitizeTableName,
 } from './sqlCompiler';
 
@@ -119,5 +123,51 @@ describe('workbench sqlCompiler', () => {
       { checkpoint: true },
     );
     expect(ckpt.sql).toContain('CREATE OR REPLACE TABLE "t@s5"');
+  });
+
+  it('compiles v1.1 Compare schema diff, uniqueness check, and FULL OUTER JOIN + IS DISTINCT FROM', () => {
+    const schema = computeSchemaDiff(
+      [
+        { name: '__rid', type: 'Int64' },
+        { name: 'id', type: 'Utf8' },
+        { name: 'amount', type: 'Int64' },
+        { name: 'old_col', type: 'Utf8' },
+      ],
+      [
+        { name: '__rid', type: 'Int64' },
+        { name: 'id', type: 'Utf8' },
+        { name: 'amount', type: 'Float64' },
+        { name: 'new_col', type: 'Utf8' },
+      ],
+    );
+    expect(schema.shared).toEqual(['id', 'amount']);
+    expect(schema.removedFromLeft).toEqual(['old_col']);
+    expect(schema.addedInRight).toEqual(['new_col']);
+    expect(schema.typeChanges).toEqual([
+      { column: 'amount', leftType: 'Int64', rightType: 'Float64' },
+    ]);
+
+    const uniq = buildKeyUniquenessCheckSql('left_tbl', ['id']);
+    expect(uniq).toContain('GROUP BY "id"');
+
+    const diffSql = buildCompareDiffSql({
+      leftAlias: 'left_tbl',
+      rightAlias: 'right_tbl',
+      keyColumns: ['id'],
+      compareColumns: ['amount'],
+      statusFilter: 'changed',
+    });
+    expect(diffSql).toContain('FULL OUTER JOIN "right_tbl" R');
+    expect(diffSql).toContain('IS DISTINCT FROM');
+    expect(diffSql).toContain(`WHERE "__diff_status" = 'changed'`);
+
+    const sumSql = buildCompareSummarySql({
+      leftAlias: 'left_tbl',
+      rightAlias: 'right_tbl',
+      keyColumns: ['id'],
+      compareColumns: ['amount'],
+    });
+    expect(sumSql).toContain('added_count');
+    expect(sumSql).toContain('changed_count');
   });
 });

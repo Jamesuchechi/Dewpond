@@ -1,6 +1,7 @@
 import type { LocaleNumberFormat } from '@dewpond/ingest';
 import type { LogicalType, RedactAction, Step } from '@dewpond/recipe';
 import { ident, lit } from '@dewpond/sqlkit';
+import type { GridColumnMeta } from './arrowFormat';
 
 export interface ColumnCastSpec {
   name: string;
@@ -590,4 +591,151 @@ export function compileFullRecipeSql(
       .join('\n\n') +
     '\n'
   );
+}
+
+export interface SchemaDiffResult {
+  shared: string[];
+  addedInRight: string[];
+  removedFromLeft: string[];
+  typeChanges: Array<{ column: string; leftType: string; rightType: string }>;
+}
+
+/** Compare column schemas between left (baseline) and right (target) tables. */
+export function computeSchemaDiff(
+  leftCols: readonly GridColumnMeta[],
+  rightCols: readonly GridColumnMeta[],
+): SchemaDiffResult {
+  const leftMap = new Map<string, string>();
+  for (const c of leftCols) {
+    if (c.name !== '__rid') leftMap.set(c.name, c.type);
+  }
+  const rightMap = new Map<string, string>();
+  for (const c of rightCols) {
+    if (c.name !== '__rid') rightMap.set(c.name, c.type);
+  }
+
+  const shared: string[] = [];
+  const removedFromLeft: string[] = [];
+  const addedInRight: string[] = [];
+  const typeChanges: Array<{ column: string; leftType: string; rightType: string }> = [];
+
+  for (const [name, lType] of leftMap) {
+    const rType = rightMap.get(name);
+    if (rType === undefined) {
+      removedFromLeft.push(name);
+    } else {
+      shared.push(name);
+      if (lType !== rType) {
+        typeChanges.push({ column: name, leftType: lType, rightType: rType });
+      }
+    }
+  }
+
+  for (const name of rightMap.keys()) {
+    if (!leftMap.has(name)) {
+      addedInRight.push(name);
+    }
+  }
+
+  return { shared, addedInRight, removedFromLeft, typeChanges };
+}
+
+/** Check whether candidate join key columns are unique in a table. */
+export function buildKeyUniquenessCheckSql(
+  tableAlias: string,
+  keyColumns: readonly string[],
+): string {
+  const keys = keyColumns.map((k) => ident(k)).join(', ');
+  return `SELECT
+  count(*)::BIGINT AS duplicate_groups,
+  coalesce(sum(cnt - 1), 0)::BIGINT AS duplicate_rows
+FROM (
+  SELECT count(*) AS cnt
+  FROM ${ident(tableAlias)}
+  GROUP BY ${keys}
+  HAVING count(*) > 1
+);`;
+}
+
+export interface CompareDiffSqlOptions {
+  leftAlias: string;
+  rightAlias: string;
+  keyColumns: readonly string[];
+  compareColumns: readonly string[];
+  statusFilter?: 'all' | 'added' | 'removed' | 'changed' | 'unchanged';
+  limit?: number;
+}
+
+function buildCompareBaseCte(opts: CompareDiffSqlOptions): string {
+  const joinPreds = opts.keyColumns
+    .map((k) => `L.${ident(k)}::VARCHAR IS NOT DISTINCT FROM R.${ident(k)}::VARCHAR`)
+    .join(' AND ');
+
+  const firstKey = ident(opts.keyColumns[0]!);
+  const diffPreds = opts.compareColumns.map(
+    (c) => `L.${ident(c)}::VARCHAR IS DISTINCT FROM R.${ident(c)}::VARCHAR`,
+  );
+  const changedExpr = diffPreds.length > 0 ? `(${diffPreds.join(' OR ')})` : 'false';
+
+  const changedColChecks = opts.compareColumns.map(
+    (c) =>
+      `CASE WHEN L.${ident(c)}::VARCHAR IS DISTINCT FROM R.${ident(c)}::VARCHAR THEN ${lit(c)} ELSE NULL END`,
+  );
+  const changedColsExpr =
+    changedColChecks.length > 0
+      ? `array_to_string(list_filter([${changedColChecks.join(', ')}], x -> x IS NOT NULL), ', ')`
+      : `''`;
+
+  const keySelects = opts.keyColumns.map(
+    (k) => `coalesce(L.${ident(k)}, R.${ident(k)}) AS ${ident(k)}`,
+  );
+  const valueSelects = opts.compareColumns.flatMap((c) => [
+    `L.${ident(c)} AS ${ident(`${c} (left)`)}`,
+    `R.${ident(c)} AS ${ident(`${c} (right)`)}`,
+  ]);
+
+  return `WITH _diff AS (
+  SELECT
+    CASE
+      WHEN L.${firstKey} IS NULL THEN 'added'
+      WHEN R.${firstKey} IS NULL THEN 'removed'
+      WHEN ${changedExpr} THEN 'changed'
+      ELSE 'unchanged'
+    END AS "__diff_status",
+    ${changedColsExpr} AS "__changed_cols",
+    ${keySelects.join(',\n    ')}${valueSelects.length > 0 ? `,\n    ${valueSelects.join(',\n    ')}` : ''}
+  FROM ${ident(opts.leftAlias)} L
+  FULL OUTER JOIN ${ident(opts.rightAlias)} R
+    ON ${joinPreds}
+)`;
+}
+
+/** Build deterministic FULL OUTER JOIN + IS DISTINCT FROM diff query. */
+export function buildCompareDiffSql(opts: CompareDiffSqlOptions): string {
+  const cte = buildCompareBaseCte(opts);
+  const whereClause =
+    opts.statusFilter && opts.statusFilter !== 'all'
+      ? `\nWHERE "__diff_status" = ${lit(opts.statusFilter)}`
+      : '';
+  const orderCols = opts.keyColumns.map((k) => `${ident(k)} ASC`).join(', ');
+  const limit = opts.limit ?? 2500;
+  return `${cte}
+SELECT *
+FROM _diff${whereClause}
+ORDER BY
+  CASE "__diff_status" WHEN 'changed' THEN 0 WHEN 'added' THEN 1 WHEN 'removed' THEN 2 ELSE 3 END,
+  ${orderCols}
+LIMIT ${limit};`;
+}
+
+/** Build summary counts by diff status (added, removed, changed, unchanged). */
+export function buildCompareSummarySql(opts: CompareDiffSqlOptions): string {
+  const cte = buildCompareBaseCte(opts);
+  return `${cte}
+SELECT
+  count(*) FILTER (WHERE "__diff_status" = 'added')::BIGINT AS added_count,
+  count(*) FILTER (WHERE "__diff_status" = 'removed')::BIGINT AS removed_count,
+  count(*) FILTER (WHERE "__diff_status" = 'changed')::BIGINT AS changed_count,
+  count(*) FILTER (WHERE "__diff_status" = 'unchanged')::BIGINT AS unchanged_count
+FROM _diff;`;
 }

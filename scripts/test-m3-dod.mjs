@@ -97,6 +97,23 @@ async function runM3Browser(name, browserType) {
       `${name}: Markdown report heading missing`,
     );
 
+    // (1b) Compare (Diff) v1.1 workflow: diff base table vs redacted step + export Diff CSV/XLSX
+    await page.getByRole('tab', { name: 'Compare (Diff)' }).click();
+    await page.getByRole('button', { name: 'Run Compare (Diff)' }).click();
+    await page.getByRole('button', { name: /Changed \(\d+\)/ }).waitFor({ timeout: 15000 });
+    const diffCsvDlPromise = page.waitForEvent('download');
+    await page.getByRole('button', { name: 'Export Diff CSV' }).click();
+    const diffCsvDl = await diffCsvDlPromise;
+    assert(readFileSync(await diffCsvDl.path()).length > 50, `${name}: Diff CSV empty`);
+    const diffXlsxDlPromise = page.waitForEvent('download');
+    await page.getByRole('button', { name: 'Export Diff XLSX' }).click();
+    const diffXlsxDl = await diffXlsxDlPromise;
+    const diffXlsxBytes = readFileSync(await diffXlsxDl.path());
+    assert(
+      diffXlsxBytes[0] === 0x50 && diffXlsxBytes[1] === 0x4b,
+      `${name}: Diff XLSX invalid PK header`,
+    );
+
     // (2) Export workflow: CSV, JSON, NDJSON, Parquet (PAR1), XLSX (PK)
     await page.getByRole('tab', { name: 'Export' }).click();
     for (const [btnName, ext, checkBytes] of [
