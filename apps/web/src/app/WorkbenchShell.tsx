@@ -8,8 +8,23 @@ import {
   type XlsxSheetInfo,
   XLSX_HARD_CAP_BYTES,
 } from '@dewpond/ingest';
-import { scanColumnSample, type PiiFinding } from '@dewpond/pii';
-import { findShareUnsafeLiterals, type LogicalType, type Step } from '@dewpond/recipe';
+import {
+  formatRedactionReportMarkdown,
+  scanColumnSample,
+  type PiiFinding,
+  type RedactionAuditReport,
+} from '@dewpond/pii';
+import {
+  decodeShareRecipe,
+  detectSchemaDrift,
+  encodeShareRecipe,
+  findShareUnsafeLiterals,
+  remapRecipeColumns,
+  validateRecipeJson,
+  type LogicalType,
+  type Recipe,
+  type Step,
+} from '@dewpond/recipe';
 import { ident, lit, validateReadOnlySql } from '@dewpond/sqlkit';
 import { ComputeClient } from '../workers/compute.client';
 import type { ParsedXlsxWorkerResult } from '../workers/compute.worker';
@@ -21,6 +36,23 @@ import {
 } from '../store/workspace.store';
 import type { QueryTableResult } from './arrowFormat';
 import { DataGrid, type TablePageNav } from './DataGrid';
+import {
+  buildCsvExportBytes,
+  buildJsonExportBytes,
+  buildNdjsonExportBytes,
+  buildParquetExportBytes,
+  buildXlsxExportBytes,
+} from './exporters';
+import {
+  detectOpfsCapability,
+  loadOpfsSnapshot,
+  loadRecipeFromIndexedDb,
+  saveOpfsSnapshot,
+  saveRecipeToIndexedDb,
+  wipeAllLocalPersistence,
+  type OpfsCapability,
+  type PersistedWorkspaceSnapshot,
+} from './persistence';
 import { ProfileSparkline } from './ProfileSparkline';
 import { buildSyntheticMessyPayrollCsv } from './sampleDataset';
 import {
@@ -38,11 +70,7 @@ import {
   type RedactColumnPlan,
 } from './sqlCompiler';
 import { SqlEditor } from './SqlEditor';
-import {
-  initOfflineServiceWorker,
-  wipeServiceWorkerCaches,
-  type OfflineSwStatus,
-} from './swClient';
+import { initOfflineServiceWorker, type OfflineSwStatus } from './swClient';
 import {
   DewpondLogo,
   IconAlertTriangle,
@@ -122,7 +150,23 @@ interface StagedXlsxReview {
 }
 
 type StagedReview = StagedCsvReview | StagedXlsxReview;
-type CleanOp = 'trim' | 'dedupe' | 'filter' | 'rename' | 'drop';
+type CleanOp =
+  | 'dedupe'
+  | 'trim'
+  | 'case'
+  | 'filter'
+  | 'derive'
+  | 'cast'
+  | 'rename'
+  | 'drop'
+  | 'reorder'
+  | 'replace'
+  | 'regexExtract'
+  | 'split'
+  | 'merge'
+  | 'fillNulls'
+  | 'parseDate'
+  | 'parseNumber';
 
 interface ProfileSummaryState {
   tableAlias: string;
@@ -222,6 +266,7 @@ export function WorkbenchShell() {
     computeRef.current = new ComputeClient();
   }
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const recipeImportInputRef = useRef<HTMLInputElement | null>(null);
   const stagedSourceRef = useRef<{ file?: File; text?: string } | null>(null);
   const pageCacheRef = useRef<Map<string, QueryTableResult>>(new Map());
 
@@ -271,12 +316,45 @@ export function WorkbenchShell() {
 
   useEffect(() => {
     const syncFromHash = () => {
+      const hash = window.location.hash;
+      if (hash.startsWith('#r=')) {
+        const decoded = decodeShareRecipe(hash);
+        if (decoded.ok) {
+          setImportedRecipe(decoded.recipe);
+          setStatusNote(
+            `Decoded shared #r= Recipe "${decoded.recipe.name}" (${decoded.recipe.steps.length} steps). Review & replay.`,
+          );
+        } else {
+          setStatusNote(`Blocked shared #r= Recipe: ${decoded.error}`);
+        }
+        return;
+      }
       setActiveFeature(readFeatureFromHash());
     };
     syncFromHash();
     window.addEventListener('hashchange', syncFromHash);
     return () => window.removeEventListener('hashchange', syncFromHash);
   }, [setActiveFeature]);
+
+  useEffect(() => {
+    void detectOpfsCapability().then(setOpfsCap);
+    void loadRecipeFromIndexedDb().then((snap) => {
+      if (snap && snap.recipe.steps.length > 0) {
+        setSavedSnapshot(snap);
+      }
+    });
+  }, []);
+
+  useEffect(() => {
+    if (recipe.steps.length === 0) return;
+    const baseAlias =
+      (tables.find((t) => t.id === selectedTableId) ?? tables[0])?.baseAlias ?? null;
+    void saveRecipeToIndexedDb({
+      recipe,
+      tableName: baseAlias,
+      savedAt: Date.now(),
+    });
+  }, [recipe, tables, selectedTableId]);
 
   function navigateFeature(next: WorkbenchFeature): void {
     setActiveFeature(next);
@@ -301,6 +379,33 @@ export function WorkbenchShell() {
   );
   const [cleanFilterVal, setCleanFilterVal] = useState<string>('');
   const [cleanRenameTo, setCleanRenameTo] = useState<string>('renamed_col');
+  const [cleanCaseMode, setCleanCaseMode] = useState<'lower' | 'upper' | 'title'>('lower');
+  const [cleanCastType, setCleanCastType] = useState<LogicalType>('DOUBLE');
+  const [cleanDeriveCol, setCleanDeriveCol] = useState<string>('derived_col');
+  const [cleanDeriveExpr, setCleanDeriveExpr] = useState<string>('amount * 1.075');
+  const [cleanReplaceSearch, setCleanReplaceSearch] = useState<string>('');
+  const [cleanReplaceWith, setCleanReplaceWith] = useState<string>('');
+  const [cleanRegexPattern, setCleanRegexPattern] = useState<string>('([0-9]+)');
+  const [cleanRegexInto, setCleanRegexInto] = useState<string>('extracted_part');
+  const [cleanSplitDelim, setCleanSplitDelim] = useState<string>('@');
+  const [cleanSplitInto, setCleanSplitInto] = useState<string>('part_1, part_2');
+  const [cleanMergeCols, setCleanMergeCols] = useState<string>('');
+  const [cleanMergeSep, setCleanMergeSep] = useState<string>(' ');
+  const [cleanMergeInto, setCleanMergeInto] = useState<string>('merged_col');
+  const [cleanFillStrategy, setCleanFillStrategy] = useState<'value' | 'mean' | 'median' | 'ffill'>(
+    'value',
+  );
+  const [cleanFillVal, setCleanFillVal] = useState<string>('0');
+  const [cleanDateFmt, setCleanDateFmt] = useState<'DMY' | 'MDY' | 'ISO'>('DMY');
+  const [cleanNumLocale, setCleanNumLocale] = useState<'us_currency' | 'eu_decimal'>('us_currency');
+  const [cleanReorderCsv, setCleanReorderCsv] = useState<string>('');
+
+  // Persistence & Recipe Import state
+  const [opfsCap, setOpfsCap] = useState<OpfsCapability>({ available: true });
+  const [savedSnapshot, setSavedSnapshot] = useState<PersistedWorkspaceSnapshot | null>(null);
+  const [importedRecipe, setImportedRecipe] = useState<Recipe | null>(null);
+  const [driftMap, setDriftMap] = useState<Record<string, string>>({});
+  const [shareLinkCopied, setShareLinkCopied] = useState(false);
 
   // SQL Guard override state
   const [allowTrustedDdl, setAllowTrustedDdl] = useState(false);
@@ -314,6 +419,7 @@ export function WorkbenchShell() {
   const [qiColumns, setQiColumns] = useState<string[]>([]);
   const [kAnonResult, setKAnonResult] = useState<QueryTableResult | null>(null);
   const [lastRedactTimestamp, setLastRedactTimestamp] = useState<number | null>(null);
+  const [neutralizeFormulas, setNeutralizeFormulas] = useState(true);
 
   const activeTable: LoadedTableMeta | undefined =
     tables.find((t) => t.id === selectedTableId) ?? tables[0];
@@ -1031,57 +1137,212 @@ export function WorkbenchShell() {
     }
   }
 
+  function buildCandidateCleanStep(stepIndex: number): { step?: Step; error?: string } {
+    if (!activeTable) return { error: 'Load a table first.' };
+    const stepId = `s${stepIndex}`;
+    const table = activeTable.alias;
+
+    switch (cleanOp) {
+      case 'trim':
+        return { step: { id: stepId, op: 'trim', table, columns: userColumns.map((c) => c.name) } };
+      case 'case':
+        return {
+          step: { id: stepId, op: 'case', table, columns: [cleanPrimaryCol], mode: cleanCaseMode },
+        };
+      case 'dedupe':
+        return {
+          step: {
+            id: stepId,
+            op: 'dedupe',
+            table,
+            keys: [cleanPrimaryCol],
+            keep: cleanDedupeKeep,
+            orderBy: cleanOrderCol || undefined,
+          },
+        };
+      case 'filter':
+        return {
+          step: {
+            id: stepId,
+            op: 'filter',
+            table,
+            predicate: {
+              column: cleanPrimaryCol,
+              op: cleanFilterOp,
+              value: cleanFilterOp === 'not_null' ? null : cleanFilterVal,
+            },
+          },
+        };
+      case 'cast':
+        return {
+          step: {
+            id: stepId,
+            op: 'cast',
+            table,
+            column: cleanPrimaryCol,
+            to: cleanCastType,
+            onFail: 'null',
+          },
+        };
+      case 'derive': {
+        const col = cleanDeriveCol.trim();
+        const expr = cleanDeriveExpr.trim();
+        if (!col || !expr) return { error: 'Provide both target column name and SQL expression.' };
+        return {
+          step: {
+            id: stepId,
+            op: 'derive',
+            table,
+            column: col,
+            expr: { kind: 'sql', expression: expr },
+          },
+        };
+      }
+      case 'rename': {
+        const targetName = cleanRenameTo.trim();
+        if (!targetName || targetName === cleanPrimaryCol) {
+          return { error: 'Choose a distinct target column name before renaming.' };
+        }
+        return { step: { id: stepId, op: 'rename', table, from: cleanPrimaryCol, to: targetName } };
+      }
+      case 'drop':
+        return { step: { id: stepId, op: 'drop', table, columns: [cleanPrimaryCol] } };
+      case 'reorder': {
+        const cols = cleanReorderCsv
+          .split(',')
+          .map((s) => s.trim())
+          .filter(Boolean);
+        if (cols.length === 0) return { error: 'Enter comma-separated column names to reorder.' };
+        return { step: { id: stepId, op: 'reorder', table, columns: cols } };
+      }
+      case 'replace':
+        return {
+          step: {
+            id: stepId,
+            op: 'replace',
+            table,
+            column: cleanPrimaryCol,
+            search: cleanReplaceSearch,
+            replacement: cleanReplaceWith,
+          },
+        };
+      case 'regexExtract': {
+        const into = cleanRegexInto.trim();
+        if (!cleanRegexPattern || !into)
+          return { error: 'Provide regex pattern and output column.' };
+        return {
+          step: {
+            id: stepId,
+            op: 'regexExtract',
+            table,
+            column: cleanPrimaryCol,
+            pattern: cleanRegexPattern,
+            into,
+            group: 1,
+          },
+        };
+      }
+      case 'split': {
+        const into = cleanSplitInto
+          .split(',')
+          .map((s) => s.trim())
+          .filter(Boolean);
+        if (into.length === 0) return { error: 'Provide comma-separated output column names.' };
+        return {
+          step: {
+            id: stepId,
+            op: 'split',
+            table,
+            column: cleanPrimaryCol,
+            delimiter: cleanSplitDelim,
+            into,
+          },
+        };
+      }
+      case 'merge': {
+        const cols = cleanMergeCols
+          .split(',')
+          .map((s) => s.trim())
+          .filter(Boolean);
+        const into = cleanMergeInto.trim();
+        if (cols.length < 2 || !into) {
+          return { error: 'Provide at least 2 comma-separated columns and output column name.' };
+        }
+        return {
+          step: { id: stepId, op: 'merge', table, columns: cols, separator: cleanMergeSep, into },
+        };
+      }
+      case 'fillNulls':
+        return {
+          step: {
+            id: stepId,
+            op: 'fillNulls',
+            table,
+            column: cleanPrimaryCol,
+            strategy: cleanFillStrategy,
+            value: cleanFillStrategy === 'value' ? cleanFillVal : undefined,
+          },
+        };
+      case 'parseDate':
+        return {
+          step: {
+            id: stepId,
+            op: 'parseDate',
+            table,
+            column: cleanPrimaryCol,
+            format: cleanDateFmt,
+          },
+        };
+      case 'parseNumber':
+        return {
+          step: {
+            id: stepId,
+            op: 'parseNumber',
+            table,
+            column: cleanPrimaryCol,
+            locale: cleanNumLocale,
+          },
+        };
+    }
+  }
+
+  const candidateCleanPreview = (() => {
+    if (!activeTable || activeFeature !== 'clean') return null;
+    const stepIndex = recipe.head + 1;
+    const targetAlias = `${activeTable.baseAlias}@s${stepIndex}`;
+    const candidate = buildCandidateCleanStep(stepIndex);
+    if (!candidate.step) return null;
+    try {
+      return {
+        checkpoint: stepIndex % 5 === 0,
+        compiled: compileCleanStepSql(activeTable.alias, targetAlias, candidate.step, {
+          checkpoint: stepIndex % 5 === 0,
+        }),
+      };
+    } catch {
+      return null;
+    }
+  })();
+
   async function handleApplyCleanStep(): Promise<void> {
     if (!activeTable) return;
     const stepIndex = recipe.head + 1;
     const stepId = `s${stepIndex}`;
     const targetAlias = `${activeTable.baseAlias}@${stepId}`;
 
-    let step: Step;
-    if (cleanOp === 'trim') {
-      const textCols = userColumns.map((c) => c.name);
-      step = { id: stepId, op: 'trim', table: activeTable.alias, columns: textCols };
-    } else if (cleanOp === 'dedupe') {
-      step = {
-        id: stepId,
-        op: 'dedupe',
-        table: activeTable.alias,
-        keys: [cleanPrimaryCol],
-        keep: cleanDedupeKeep,
-        orderBy: cleanOrderCol || undefined,
-      };
-    } else if (cleanOp === 'filter') {
-      step = {
-        id: stepId,
-        op: 'filter',
-        table: activeTable.alias,
-        predicate: {
-          column: cleanPrimaryCol,
-          op: cleanFilterOp,
-          value: cleanFilterOp === 'not_null' ? null : cleanFilterVal,
-        },
-      };
-    } else if (cleanOp === 'rename') {
-      const targetName = cleanRenameTo.trim();
-      if (!targetName || targetName === cleanPrimaryCol) {
-        setStatusNote('Choose a distinct target column name before renaming.');
-        return;
-      }
-      step = {
-        id: stepId,
-        op: 'rename',
-        table: activeTable.alias,
-        from: cleanPrimaryCol,
-        to: targetName,
-      };
-    } else {
-      step = { id: stepId, op: 'drop', table: activeTable.alias, columns: [cleanPrimaryCol] };
+    const candidate = buildCandidateCleanStep(stepIndex);
+    if (!candidate.step) {
+      if (candidate.error) setStatusNote(candidate.error);
+      return;
     }
+    const step = candidate.step;
 
     setBusy(true, `Applying ${step.op} (${stepId})…`);
     try {
       const client = await ensureEngineReady();
-      const compiled = compileCleanStepSql(activeTable.alias, targetAlias, step);
+      const compiled = compileCleanStepSql(activeTable.alias, targetAlias, step, {
+        checkpoint: stepIndex % 5 === 0,
+      });
       await client.exec(compiled.sql);
 
       const countRes = await client.queryRows(
@@ -1276,9 +1537,9 @@ export function WorkbenchShell() {
     }
   }
 
-  function handleDownloadRedactReport(): void {
-    if (!activeTable) return;
-    const report = {
+  function buildRedactAuditReport(): RedactionAuditReport | null {
+    if (!activeTable) return null;
+    return {
       generatedAt: new Date(lastRedactTimestamp ?? Date.now()).toISOString(),
       tableAlias: activeTable.alias,
       rowCount: activeTable.rowCount,
@@ -1292,6 +1553,19 @@ export function WorkbenchShell() {
       quasiIdentifiers: qiColumns,
       smallCohortsDetected: kAnonResult?.rows.length ?? null,
     };
+  }
+
+  function handleDownloadRedactReport(format: 'json' | 'md'): void {
+    const report = buildRedactAuditReport();
+    if (!report || !activeTable) return;
+    if (format === 'md') {
+      triggerBlobDownload(
+        `${activeTable.baseAlias}_redaction_report.md`,
+        formatRedactionReportMarkdown(report),
+        'text/markdown;charset=utf-8',
+      );
+      return;
+    }
     triggerBlobDownload(
       `${activeTable.baseAlias}_redaction_report.json`,
       JSON.stringify(report, null, 2),
@@ -1299,23 +1573,45 @@ export function WorkbenchShell() {
     );
   }
 
-  async function handleExportData(format: 'csv' | 'json'): Promise<void> {
+  async function handleExportData(
+    format: 'csv' | 'json' | 'ndjson' | 'parquet' | 'xlsx',
+  ): Promise<void> {
     if (!activeTable) return;
     setBusy(true, `Exporting "${activeTable.alias}" as ${format.toUpperCase()}…`);
     try {
       const client = await ensureEngineReady();
-      const bytes = await client.exportTable(activeTable.alias, format);
-      triggerBlobDownload(
-        `${activeTable.baseAlias}.${format}`,
-        bytes,
-        format === 'csv' ? 'text/csv;charset=utf-8' : 'application/json',
+      const res = await client.queryRows(
+        `SELECT * EXCLUDE ("__rid") FROM ${ident(activeTable.alias)} LIMIT 250000;`,
+        250000,
       );
+      let bytes: Uint8Array;
+      let mime: string;
+
+      if (format === 'csv') {
+        bytes = buildCsvExportBytes(res.columns, res.rows, neutralizeFormulas);
+        mime = 'text/csv;charset=utf-8';
+      } else if (format === 'json') {
+        bytes = buildJsonExportBytes(res.columns, res.rows);
+        mime = 'application/json';
+      } else if (format === 'ndjson') {
+        bytes = buildNdjsonExportBytes(res.columns, res.rows);
+        mime = 'application/x-ndjson';
+      } else if (format === 'parquet') {
+        bytes = buildParquetExportBytes(res.columns, res.rows);
+        mime = 'application/vnd.apache.parquet';
+      } else {
+        bytes = buildXlsxExportBytes(res.columns, res.rows, neutralizeFormulas);
+        mime = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+      }
+
+      triggerBlobDownload(`${activeTable.baseAlias}.${format}`, bytes, mime);
       setStatusNote(
         `Exported ${activeTable.alias} as ${format.toUpperCase()} (${formatBytes(bytes.length)}).`,
       );
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       setQueryResult(null, msg);
+      setStatusNote(`Export failed: ${msg}`);
     } finally {
       setBusy(false);
     }
@@ -1398,11 +1694,148 @@ export function WorkbenchShell() {
     resetWorkspace();
     stagedSourceRef.current = null;
     setStagedReview(null);
+    setImportedRecipe(null);
+    setSavedSnapshot(null);
     setProfileState(null);
     setPiiFindings([]);
     setKAnonResult(null);
-    void wipeServiceWorkerCaches();
-    setStatusNote('Wiped in-memory tables, Recipe history, offline cache, and terminated workers.');
+    void wipeAllLocalPersistence();
+    setStatusNote(
+      'Wiped in-memory tables, Recipe history, IndexedDB, OPFS snapshots, offline cache, and workers.',
+    );
+  }
+
+  async function handleCopyShareLink(): Promise<void> {
+    const token = encodeShareRecipe(recipe);
+    const shareUrl = `${window.location.origin}${window.location.pathname}${token}`;
+    try {
+      await navigator.clipboard.writeText(shareUrl);
+      setShareLinkCopied(true);
+      setTimeout(() => setShareLinkCopied(false), 2000);
+      setStatusNote(`Copied #r= share link (${token.length} chars) to clipboard.`);
+    } catch {
+      window.history.replaceState(null, '', token);
+      setStatusNote(`Encoded #r= share link into URL bar (${token.length} chars).`);
+    }
+  }
+
+  async function handleImportDewJson(e: ChangeEvent<HTMLInputElement>): Promise<void> {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    try {
+      const text = await file.text();
+      const parsed = JSON.parse(text) as unknown;
+      const res = validateRecipeJson(parsed);
+      if (!res.ok) {
+        setStatusNote(`Invalid .dew.json Recipe: ${res.errors.join(' ')}`);
+        return;
+      }
+      setDriftMap({});
+      setImportedRecipe(res.recipe);
+      setStatusNote(
+        `Loaded Recipe "${res.recipe.name}" (${res.recipe.steps.length} steps) for review.`,
+      );
+    } catch (err) {
+      setStatusNote(
+        `Failed reading .dew.json: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
+  async function handleReplayImportedRecipe(recipeToRun: Recipe): Promise<void> {
+    if (!activeTable) {
+      setStatusNote('Load a table first before replaying an imported Recipe.');
+      return;
+    }
+    const remapped =
+      Object.keys(driftMap).length > 0 ? remapRecipeColumns(recipeToRun, driftMap) : recipeToRun;
+    const stepsToRun = remapped.steps.slice(0, remapped.head);
+    if (stepsToRun.length === 0) {
+      setImportedRecipe(null);
+      return;
+    }
+
+    setBusy(true, `Replaying ${stepsToRun.length} imported step(s)…`);
+    try {
+      const client = await ensureEngineReady();
+      let currentAlias = activeTable.alias;
+      const baseIndex = recipe.head;
+
+      for (let i = 0; i < stepsToRun.length; i++) {
+        const step = stepsToRun[i]!;
+        const stepNum = baseIndex + i + 1;
+        const stepId = `s${stepNum}`;
+        const targetAlias = `${activeTable.baseAlias}@${stepId}`;
+        const compiled = compileCleanStepSql(currentAlias, targetAlias, step, {
+          checkpoint: stepNum % 5 === 0,
+        });
+        await client.exec(compiled.sql);
+
+        const countRes = await client.queryRows(
+          `SELECT count(*)::BIGINT AS c FROM ${ident(targetAlias)};`,
+          1,
+        );
+        const rowCount = Number(countRes.rows[0]?.[0] ?? 0);
+        const preview = await client.queryRows(
+          `SELECT * FROM ${ident(targetAlias)} LIMIT 500;`,
+          500,
+        );
+
+        recordExecutedStep(
+          { ...step, id: stepId },
+          {
+            stepId,
+            label: compiled.label,
+            tableId: activeTable.id,
+            targetAlias,
+            sql: compiled.sql,
+            rowCount,
+            columns: preview.columns,
+          },
+        );
+        pageCacheRef.current.set(`${targetAlias}:0`, preview);
+        setQueryResult(preview, null);
+        currentAlias = targetAlias;
+      }
+
+      setImportedRecipe(null);
+      setDriftMap({});
+      setSavedSnapshot(null);
+      navigateFeature('data');
+      await refreshMemoryGauge();
+      setStatusNote(`Replayed ${stepsToRun.length} step(s) onto "${activeTable.baseAlias}".`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setQueryResult(null, msg);
+      setStatusNote(`Recipe replay failed: ${msg}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleSaveOpfsSnapshot(): Promise<void> {
+    const ok = await saveOpfsSnapshot({
+      recipe,
+      tableName: activeTable?.baseAlias ?? null,
+      savedAt: Date.now(),
+    });
+    setStatusNote(
+      ok
+        ? `Saved OPFS workspace snapshot (${recipe.steps.length} steps).`
+        : 'OPFS snapshot unavailable; Recipe remains autosaved in IndexedDB.',
+    );
+  }
+
+  async function handleRestoreOpfsSnapshot(): Promise<void> {
+    const snap = await loadOpfsSnapshot();
+    if (!snap) {
+      setStatusNote('No OPFS workspace snapshot found.');
+      return;
+    }
+    setDriftMap({});
+    setImportedRecipe(snap.recipe);
+    setStatusNote(`Loaded OPFS snapshot (${snap.recipe.steps.length} steps) for replay.`);
   }
 
   const ambiguousCols =
@@ -1416,6 +1849,13 @@ export function WorkbenchShell() {
         accept=".csv,.tsv,.txt,.xlsx,.xlsm,.parquet,.json,.ndjson"
         className="wb-sr-only"
         onChange={handleFileInputChange}
+      />
+      <input
+        ref={recipeImportInputRef}
+        type="file"
+        accept=".json,.dew.json"
+        className="wb-sr-only"
+        onChange={handleImportDewJson}
       />
 
       {/* Deep Navy Top Command Bar */}
@@ -1754,10 +2194,21 @@ export function WorkbenchShell() {
                         {(
                           [
                             ['dedupe', 'Exact Dedupe'],
-                            ['trim', 'Trim All Text Columns'],
+                            ['trim', 'Trim Text'],
+                            ['case', 'Case'],
                             ['filter', 'Filter Rows'],
-                            ['rename', 'Rename Column'],
-                            ['drop', 'Drop Column'],
+                            ['derive', 'Derive'],
+                            ['cast', 'Cast'],
+                            ['rename', 'Rename'],
+                            ['drop', 'Drop'],
+                            ['reorder', 'Reorder'],
+                            ['replace', 'Replace'],
+                            ['regexExtract', 'Regex Extract'],
+                            ['split', 'Split'],
+                            ['merge', 'Merge'],
+                            ['fillNulls', 'Fill Nulls'],
+                            ['parseDate', 'Parse Date'],
+                            ['parseNumber', 'Parse Number'],
                           ] as const
                         ).map(([op, label]) => (
                           <button
@@ -1772,7 +2223,10 @@ export function WorkbenchShell() {
                       </div>
 
                       <div className="wb-form-row">
-                        {cleanOp !== 'trim' ? (
+                        {cleanOp !== 'trim' &&
+                        cleanOp !== 'derive' &&
+                        cleanOp !== 'reorder' &&
+                        cleanOp !== 'merge' ? (
                           <label>
                             Target / Key Column
                             <select
@@ -1815,6 +2269,59 @@ export function WorkbenchShell() {
                                   </option>
                                 ))}
                               </select>
+                            </label>
+                          </>
+                        ) : null}
+
+                        {cleanOp === 'case' ? (
+                          <label>
+                            Case Mode
+                            <select
+                              value={cleanCaseMode}
+                              onChange={(e) =>
+                                setCleanCaseMode(e.target.value as 'lower' | 'upper' | 'title')
+                              }
+                            >
+                              <option value="lower">lowercase</option>
+                              <option value="upper">UPPERCASE</option>
+                              <option value="title">Title Case</option>
+                            </select>
+                          </label>
+                        ) : null}
+
+                        {cleanOp === 'cast' ? (
+                          <label>
+                            Target Type
+                            <select
+                              value={cleanCastType}
+                              onChange={(e) => setCleanCastType(e.target.value as LogicalType)}
+                            >
+                              {LOGICAL_TYPES.map((lt) => (
+                                <option key={lt} value={lt}>
+                                  {lt}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                        ) : null}
+
+                        {cleanOp === 'derive' ? (
+                          <>
+                            <label>
+                              New Column Name
+                              <input
+                                type="text"
+                                value={cleanDeriveCol}
+                                onChange={(e) => setCleanDeriveCol(e.target.value)}
+                              />
+                            </label>
+                            <label>
+                              SQL Expression
+                              <input
+                                type="text"
+                                value={cleanDeriveExpr}
+                                onChange={(e) => setCleanDeriveExpr(e.target.value)}
+                              />
                             </label>
                           </>
                         ) : null}
@@ -1862,6 +2369,176 @@ export function WorkbenchShell() {
                           </label>
                         ) : null}
 
+                        {cleanOp === 'reorder' ? (
+                          <label>
+                            Column Order (comma-separated)
+                            <input
+                              type="text"
+                              placeholder={userColumns.map((c) => c.name).join(', ')}
+                              value={cleanReorderCsv}
+                              onChange={(e) => setCleanReorderCsv(e.target.value)}
+                            />
+                          </label>
+                        ) : null}
+
+                        {cleanOp === 'replace' ? (
+                          <>
+                            <label>
+                              Find
+                              <input
+                                type="text"
+                                value={cleanReplaceSearch}
+                                onChange={(e) => setCleanReplaceSearch(e.target.value)}
+                              />
+                            </label>
+                            <label>
+                              Replace With
+                              <input
+                                type="text"
+                                value={cleanReplaceWith}
+                                onChange={(e) => setCleanReplaceWith(e.target.value)}
+                              />
+                            </label>
+                          </>
+                        ) : null}
+
+                        {cleanOp === 'regexExtract' ? (
+                          <>
+                            <label>
+                              Regex Pattern
+                              <input
+                                type="text"
+                                value={cleanRegexPattern}
+                                onChange={(e) => setCleanRegexPattern(e.target.value)}
+                              />
+                            </label>
+                            <label>
+                              Output Column
+                              <input
+                                type="text"
+                                value={cleanRegexInto}
+                                onChange={(e) => setCleanRegexInto(e.target.value)}
+                              />
+                            </label>
+                          </>
+                        ) : null}
+
+                        {cleanOp === 'split' ? (
+                          <>
+                            <label>
+                              Delimiter
+                              <input
+                                type="text"
+                                value={cleanSplitDelim}
+                                onChange={(e) => setCleanSplitDelim(e.target.value)}
+                              />
+                            </label>
+                            <label>
+                              Output Columns (comma-separated)
+                              <input
+                                type="text"
+                                value={cleanSplitInto}
+                                onChange={(e) => setCleanSplitInto(e.target.value)}
+                              />
+                            </label>
+                          </>
+                        ) : null}
+
+                        {cleanOp === 'merge' ? (
+                          <>
+                            <label>
+                              Columns (comma-separated)
+                              <input
+                                type="text"
+                                placeholder={userColumns
+                                  .slice(0, 2)
+                                  .map((c) => c.name)
+                                  .join(', ')}
+                                value={cleanMergeCols}
+                                onChange={(e) => setCleanMergeCols(e.target.value)}
+                              />
+                            </label>
+                            <label>
+                              Separator
+                              <input
+                                type="text"
+                                value={cleanMergeSep}
+                                onChange={(e) => setCleanMergeSep(e.target.value)}
+                              />
+                            </label>
+                            <label>
+                              Output Column
+                              <input
+                                type="text"
+                                value={cleanMergeInto}
+                                onChange={(e) => setCleanMergeInto(e.target.value)}
+                              />
+                            </label>
+                          </>
+                        ) : null}
+
+                        {cleanOp === 'fillNulls' ? (
+                          <>
+                            <label>
+                              Strategy
+                              <select
+                                value={cleanFillStrategy}
+                                onChange={(e) =>
+                                  setCleanFillStrategy(
+                                    e.target.value as 'value' | 'mean' | 'median' | 'ffill',
+                                  )
+                                }
+                              >
+                                <option value="value">Constant Value</option>
+                                <option value="mean">Column Mean</option>
+                                <option value="median">Column Median</option>
+                                <option value="ffill">Forward Fill (__rid ASC)</option>
+                              </select>
+                            </label>
+                            {cleanFillStrategy === 'value' ? (
+                              <label>
+                                Fill Value
+                                <input
+                                  type="text"
+                                  value={cleanFillVal}
+                                  onChange={(e) => setCleanFillVal(e.target.value)}
+                                />
+                              </label>
+                            ) : null}
+                          </>
+                        ) : null}
+
+                        {cleanOp === 'parseDate' ? (
+                          <label>
+                            Date Order
+                            <select
+                              value={cleanDateFmt}
+                              onChange={(e) =>
+                                setCleanDateFmt(e.target.value as 'DMY' | 'MDY' | 'ISO')
+                              }
+                            >
+                              <option value="DMY">DMY (DD/MM/YYYY)</option>
+                              <option value="MDY">MDY (MM/DD/YYYY)</option>
+                              <option value="ISO">ISO (YYYY-MM-DD)</option>
+                            </select>
+                          </label>
+                        ) : null}
+
+                        {cleanOp === 'parseNumber' ? (
+                          <label>
+                            Number Locale
+                            <select
+                              value={cleanNumLocale}
+                              onChange={(e) =>
+                                setCleanNumLocale(e.target.value as 'us_currency' | 'eu_decimal')
+                              }
+                            >
+                              <option value="us_currency">US / NG Currency (1,250.50)</option>
+                              <option value="eu_decimal">EU Decimal (1.250,50)</option>
+                            </select>
+                          </label>
+                        ) : null}
+
                         <button
                           type="button"
                           className="wb-btn wb-btn-primary"
@@ -1871,6 +2548,18 @@ export function WorkbenchShell() {
                           Apply Clean Step
                         </button>
                       </div>
+
+                      {candidateCleanPreview ? (
+                        <div className="wb-live-sql">
+                          <div className="wb-section-title">
+                            LIVE COMPILED SQL PREVIEW{' '}
+                            {candidateCleanPreview.checkpoint ? '(CHECKPOINT TABLE)' : '(VIEW)'}
+                          </div>
+                          <pre className="wb-sql-mini">
+                            <code>{candidateCleanPreview.compiled.sql}</code>
+                          </pre>
+                        </div>
+                      ) : null}
                     </div>
                   )}
                 </div>
@@ -2130,14 +2819,22 @@ export function WorkbenchShell() {
                           </div>
                         ) : null}
 
-                        <button
-                          type="button"
-                          className="wb-btn wb-btn-outline wb-btn-block"
-                          onClick={handleDownloadRedactReport}
-                        >
-                          <IconDownload className="wb-ico-xs" /> Download Raw-Value-Free Report
-                          (.json)
-                        </button>
+                        <div className="wb-drop-buttons">
+                          <button
+                            type="button"
+                            className="wb-btn wb-btn-outline"
+                            onClick={() => handleDownloadRedactReport('json')}
+                          >
+                            <IconDownload className="wb-ico-xs" /> Report (.json)
+                          </button>
+                          <button
+                            type="button"
+                            className="wb-btn wb-btn-outline"
+                            onClick={() => handleDownloadRedactReport('md')}
+                          >
+                            <IconDownload className="wb-ico-xs" /> Report (.md)
+                          </button>
+                        </div>
                       </aside>
                     </div>
                   )}
@@ -2162,6 +2859,15 @@ export function WorkbenchShell() {
                       <p>
                         Active target: <code>{activeTable?.alias ?? 'none loaded'}</code>
                       </p>
+                      <label className="wb-check-inline">
+                        <input
+                          type="checkbox"
+                          checked={neutralizeFormulas}
+                          onChange={(e) => setNeutralizeFormulas(e.target.checked)}
+                        />
+                        Neutralize spreadsheet formulas (<code>=</code>, <code>+</code>,{' '}
+                        <code>-</code>, <code>@</code>) in CSV &amp; XLSX
+                      </label>
                       <div className="wb-drop-buttons">
                         <button
                           type="button"
@@ -2179,9 +2885,34 @@ export function WorkbenchShell() {
                         >
                           <IconDownload className="wb-ico-xs" /> Export JSON
                         </button>
+                        <button
+                          type="button"
+                          className="wb-btn wb-btn-outline"
+                          disabled={!activeTable || isBusy}
+                          onClick={() => void handleExportData('ndjson')}
+                        >
+                          <IconDownload className="wb-ico-xs" /> Export NDJSON
+                        </button>
+                        <button
+                          type="button"
+                          className="wb-btn wb-btn-outline"
+                          disabled={!activeTable || isBusy}
+                          onClick={() => void handleExportData('parquet')}
+                        >
+                          <IconDownload className="wb-ico-xs" /> Export Parquet
+                        </button>
+                        <button
+                          type="button"
+                          className="wb-btn wb-btn-outline"
+                          disabled={!activeTable || isBusy}
+                          onClick={() => void handleExportData('xlsx')}
+                        >
+                          <IconDownload className="wb-ico-xs" /> Export XLSX (&le; 50 MB)
+                        </button>
                       </div>
                       <small className="wb-muted">
-                        Parquet (`parquet-wasm`) and streaming XLSX (`fflate`) writers ship in M3.
+                        Parquet via <code>hyparquet-writer</code>; XLSX via <code>fflate</code> with
+                        text preservation &amp; 50 MB cap.
                       </small>
                     </div>
 
@@ -2321,6 +3052,64 @@ export function WorkbenchShell() {
                   : '-- Active table reflects initial typed ingest.'}
               </code>
             </pre>
+          </div>
+
+          <div className="wb-drawer-persistence">
+            <div className="wb-section-title">RECIPE SHARE &amp; LOCAL STORAGE</div>
+            {!opfsCap.available ? (
+              <p className="wb-audit-warn">{opfsCap.reason}</p>
+            ) : (
+              <p className="wb-audit-ok">
+                OPFS snapshot storage ready · IndexedDB autosave active.
+              </p>
+            )}
+            <div className="wb-drawer-actions">
+              <button
+                type="button"
+                className="wb-btn-mini"
+                disabled={isBusy}
+                onClick={() => recipeImportInputRef.current?.click()}
+              >
+                Import .dew.json
+              </button>
+              <button
+                type="button"
+                className="wb-btn-mini"
+                disabled={recipe.steps.length === 0 || isBusy}
+                onClick={() => void handleCopyShareLink()}
+              >
+                {shareLinkCopied ? 'Copied #r= Link' : 'Copy #r= Link'}
+              </button>
+              <button
+                type="button"
+                className="wb-btn-mini"
+                disabled={!opfsCap.available || recipe.steps.length === 0 || isBusy}
+                onClick={() => void handleSaveOpfsSnapshot()}
+              >
+                Save OPFS Snapshot
+              </button>
+              <button
+                type="button"
+                className="wb-btn-mini"
+                disabled={!opfsCap.available || isBusy}
+                onClick={() => void handleRestoreOpfsSnapshot()}
+              >
+                Restore OPFS Snapshot
+              </button>
+              {savedSnapshot && recipe.steps.length === 0 ? (
+                <button
+                  type="button"
+                  className="wb-btn-mini wb-btn-primary"
+                  disabled={isBusy}
+                  onClick={() => {
+                    setDriftMap({});
+                    setImportedRecipe(savedSnapshot.recipe);
+                  }}
+                >
+                  Restore Autosaved Recipe ({savedSnapshot.recipe.steps.length} steps)
+                </button>
+              ) : null}
+            </div>
           </div>
         </aside>
       </div>
@@ -2615,6 +3404,114 @@ export function WorkbenchShell() {
         </div>
       ) : null}
 
+      {/* Imported Recipe & Schema-Drift Mapper Modal */}
+      {importedRecipe ? (
+        <div
+          className="wb-modal-backdrop"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Import & Replay Recipe"
+        >
+          <div className="wb-modal-dialog">
+            <div className="wb-modal-head">
+              <div>
+                <h2>Import &amp; Replay Recipe: {importedRecipe.name}</h2>
+                <p>
+                  {importedRecipe.steps.length} step(s) · Head {importedRecipe.head} · Validated
+                  against v1 JSON Schema.
+                </p>
+              </div>
+              <button
+                type="button"
+                className="wb-btn wb-btn-outline"
+                disabled={isBusy}
+                onClick={() => {
+                  setImportedRecipe(null);
+                  setDriftMap({});
+                }}
+              >
+                Close
+              </button>
+            </div>
+
+            {(() => {
+              const importFindings = findShareUnsafeLiterals(importedRecipe);
+              const missingCols = activeTable
+                ? detectSchemaDrift(
+                    importedRecipe,
+                    userColumns.map((c) => c.name),
+                  )
+                : [];
+
+              return (
+                <div className="wb-review-box">
+                  {importFindings.length > 0 ? (
+                    <div className="wb-amber-banner">
+                      <IconAlertTriangle className="wb-ico-sm" />
+                      <div>
+                        <strong>Review required:</strong> {importFindings.length} step(s) contain
+                        user literals or raw SQL ({importFindings.map((f) => f.op).join(', ')}).
+                      </div>
+                    </div>
+                  ) : null}
+
+                  {!activeTable ? (
+                    <p className="wb-empty-note">
+                      Load a dataset first (e.g. Open Local File or Load Messy Demo), then replay
+                      this Recipe onto it.
+                    </p>
+                  ) : missingCols.length > 0 ? (
+                    <div className="wb-drift-box">
+                      <strong>Schema-Drift Column Mapper</strong>
+                      <p>
+                        Map {missingCols.length} missing column(s) from the Recipe to columns in{' '}
+                        <code>{activeTable.alias}</code>:
+                      </p>
+                      <div className="wb-form-row">
+                        {missingCols.map((missing) => (
+                          <label key={missing}>
+                            Missing: <code>{missing}</code>
+                            <select
+                              aria-label={`Map missing column ${missing}`}
+                              value={driftMap[missing] ?? ''}
+                              onChange={(e) =>
+                                setDriftMap({ ...driftMap, [missing]: e.target.value })
+                              }
+                            >
+                              <option value="">Select column…</option>
+                              {userColumns.map((c) => (
+                                <option key={c.name} value={c.name}>
+                                  {c.name}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                        ))}
+                      </div>
+                    </div>
+                  ) : (
+                    <p className="wb-audit-ok">
+                      All referenced columns match <code>{activeTable.alias}</code> cleanly.
+                    </p>
+                  )}
+
+                  <div className="wb-review-actions">
+                    <button
+                      type="button"
+                      className="wb-btn wb-btn-primary"
+                      disabled={!activeTable || isBusy || missingCols.some((col) => !driftMap[col])}
+                      onClick={() => void handleReplayImportedRecipe(importedRecipe)}
+                    >
+                      Replay Imported Recipe
+                    </button>
+                  </div>
+                </div>
+              );
+            })()}
+          </div>
+        </div>
+      ) : null}
+
       {/* Bottom Status Bar */}
       <footer className="wb-statusbar">
         <span>{busyLabel ?? statusNote}</span>
@@ -2631,7 +3528,7 @@ export function WorkbenchShell() {
           </span>
           <span>All data stays in tab (:memory: DuckDB-WASM 1.32.0)</span>
           <button type="button" className="wb-wipe-link" onClick={handleWipeSession}>
-            Wipe Session
+            Wipe all local data
           </button>
         </div>
       </footer>

@@ -18,6 +18,8 @@
     "test": "vitest run",
     "test:e2e": "node scripts/test-m0-e2e.mjs",
     "test:m1": "node scripts/test-m1-dod.mjs",
+    "test:m2": "node scripts/test-m2-dod.mjs",
+    "test:m3": "node scripts/test-m3-dod.mjs",
     "format:check": "prettier --check .",
     "check": "pnpm run lint && pnpm run typecheck && pnpm run test && pnpm run build && pnpm run verify:build"
   },

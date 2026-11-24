@@ -182,13 +182,13 @@ async function runBrowserSuite(name, browserType, fiftyMbInfo) {
     await context.setOffline(false);
 
     // Clear demo session before 50 MB CSV test
-    await page.getByRole('button', { name: 'Wipe Session' }).click();
+    await page.getByRole('button', { name: /Wipe (Session|all local data)/i }).click();
     await page
       .locator('.wb-empty-note', { hasText: 'No tables committed yet.' })
       .waitFor({ timeout: 10000 });
 
     // (d) 50 MB CSV opens and queries without main-thread RAF gaps > 50 ms + cached virtualized grid
-    const fileInput = page.locator('input[type="file"]');
+    const fileInput = page.locator('input[type="file"][accept*=".csv"]');
     await fileInput.setInputFiles(fiftyMbInfo.filePath);
     await page
       .getByRole('button', { name: 'Commit Typed Load into DuckDB' })

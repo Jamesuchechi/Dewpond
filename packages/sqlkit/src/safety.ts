@@ -246,3 +246,32 @@ export function validateReadOnlySql(sql: string): SqlSafetyResult {
 
   return { ok: true };
 }
+
+export type SqlStatementClass = 'read_only' | 'ddl_or_dml' | 'external_io' | 'invalid';
+
+/** Classify a raw SQL statement for Recipe/Workbench security gating. */
+export function classifySqlStatement(sql: string): {
+  kind: SqlStatementClass;
+  safety: SqlSafetyResult;
+} {
+  const safety = validateReadOnlySql(sql);
+  if (safety.ok) {
+    return { kind: 'read_only', safety };
+  }
+  const hasExternal = safety.reasons.some(
+    (r) =>
+      r.includes('URI scheme') ||
+      r.includes('table/filesystem function') ||
+      r.includes('ATTACH') ||
+      r.includes('COPY') ||
+      r.includes('INSTALL') ||
+      r.includes('LOAD') ||
+      r.includes('EXPORT') ||
+      r.includes('IMPORT'),
+  );
+  if (hasExternal) {
+    return { kind: 'external_io', safety };
+  }
+  const hasDdl = safety.reasons.some((r) => r.includes('Only single SELECT or WITH'));
+  return { kind: hasDdl ? 'ddl_or_dml' : 'invalid', safety };
+}

@@ -248,40 +248,194 @@ export function compileCleanStepSql(
   sourceAlias: string,
   targetAlias: string,
   step: Step,
+  opts?: { checkpoint?: boolean },
 ): CleanStepCompileResult {
   const src = ident(sourceAlias);
   const dst = ident(targetAlias);
+  const relationKind = opts?.checkpoint ? 'TABLE' : 'VIEW';
 
   switch (step.op) {
     case 'trim':
       return {
         label: `Trim ${step.columns.length} column(s)`,
-        sql: `CREATE OR REPLACE VIEW ${dst} AS
+        sql: `CREATE OR REPLACE ${relationKind} ${dst} AS
 SELECT * REPLACE (${step.columns.map((c) => `trim(${ident(c)}::VARCHAR) AS ${ident(c)}`).join(', ')})
 FROM ${src};`,
       };
+    case 'case': {
+      const fnForMode = (colSql: string): string => {
+        if (step.mode === 'upper') return `upper(${colSql}::VARCHAR)`;
+        if (step.mode === 'lower') return `lower(${colSql}::VARCHAR)`;
+        // Deterministic Title Case per whitespace-delimited word
+        return `list_aggregate(list_transform(string_split(trim(${colSql}::VARCHAR), ' '), w -> CASE WHEN length(w) = 0 THEN '' ELSE upper(left(w, 1)) || lower(substr(w, 2)) END), 'string_agg', ' ')`;
+      };
+      return {
+        label: `Case ${step.mode} (${step.columns.join(', ')})`,
+        sql: `CREATE OR REPLACE ${relationKind} ${dst} AS
+SELECT * REPLACE (${step.columns.map((c) => `${fnForMode(ident(c))} AS ${ident(c)}`).join(', ')})
+FROM ${src};`,
+      };
+    }
     case 'rename':
       return {
         label: `Rename ${step.from} -> ${step.to}`,
-        sql: `CREATE OR REPLACE VIEW ${dst} AS
+        sql: `CREATE OR REPLACE ${relationKind} ${dst} AS
 SELECT * RENAME (${ident(step.from)} AS ${ident(step.to)})
 FROM ${src};`,
       };
     case 'drop':
       return {
         label: `Drop ${step.columns.join(', ')}`,
-        sql: `CREATE OR REPLACE VIEW ${dst} AS
+        sql: `CREATE OR REPLACE ${relationKind} ${dst} AS
 SELECT * EXCLUDE (${step.columns.map((c) => ident(c)).join(', ')})
 FROM ${src};`,
       };
+    case 'reorder': {
+      const ordered = step.columns.map((c) => ident(c)).join(', ');
+      return {
+        label: `Reorder ${step.columns.length} column(s)`,
+        sql: `CREATE OR REPLACE ${relationKind} ${dst} AS
+SELECT "__rid", ${ordered}
+FROM ${src};`,
+      };
+    }
     case 'filter':
       return {
         label: `Filter ${step.predicate.column} (${step.predicate.op})`,
-        sql: `CREATE OR REPLACE VIEW ${dst} AS
+        sql: `CREATE OR REPLACE ${relationKind} ${dst} AS
 SELECT *
 FROM ${src}
 WHERE ${compilePredicateSql(step)};`,
       };
+    case 'cast': {
+      const col = ident(step.column);
+      const expr = castColumnExpr({ name: step.column, targetType: step.to }, 'ISO');
+      return {
+        label: `Cast ${step.column} -> ${step.to}`,
+        sql: `CREATE OR REPLACE ${relationKind} ${dst} AS
+SELECT * REPLACE (${expr} AS ${col})
+FROM ${src};`,
+      };
+    }
+    case 'derive': {
+      const targetCol = ident(step.column);
+      let exprSql: string;
+      if (step.expr.kind === 'column') {
+        exprSql = ident(step.expr.name);
+      } else if (step.expr.kind === 'literal') {
+        exprSql = lit(step.expr.value);
+      } else {
+        exprSql = `(${step.expr.expression})`;
+      }
+      return {
+        label: `Derive ${step.column}`,
+        sql: `CREATE OR REPLACE ${relationKind} ${dst} AS
+SELECT *, ${exprSql} AS ${targetCol}
+FROM ${src};`,
+      };
+    }
+    case 'replace': {
+      const col = ident(step.column);
+      return {
+        label: `Replace in ${step.column}`,
+        sql: `CREATE OR REPLACE ${relationKind} ${dst} AS
+SELECT * REPLACE (replace(${col}::VARCHAR, ${lit(step.search)}, ${lit(step.replacement)}) AS ${col})
+FROM ${src};`,
+      };
+    }
+    case 'regexExtract': {
+      const col = ident(step.column);
+      const groupIdx = Math.max(0, Math.floor(step.group ?? 1));
+      return {
+        label: `Regex extract ${step.into} from ${step.column}`,
+        sql: `CREATE OR REPLACE ${relationKind} ${dst} AS
+SELECT *, NULLIF(regexp_extract(${col}::VARCHAR, ${lit(step.pattern)}, ${groupIdx}), '') AS ${ident(step.into)}
+FROM ${src};`,
+      };
+    }
+    case 'split': {
+      const col = ident(step.column);
+      const parts = step.into.map(
+        (name, idx) =>
+          `NULLIF(list_extract(string_split(${col}::VARCHAR, ${lit(step.delimiter)}), ${idx + 1}), '') AS ${ident(name)}`,
+      );
+      return {
+        label: `Split ${step.column} -> ${step.into.join(', ')}`,
+        sql: `CREATE OR REPLACE ${relationKind} ${dst} AS
+SELECT *, ${parts.join(', ')}
+FROM ${src};`,
+      };
+    }
+    case 'merge': {
+      const expr = `concat_ws(${lit(step.separator)}, ${step.columns.map((c) => `NULLIF(${ident(c)}::VARCHAR, '')`).join(', ')})`;
+      return {
+        label: `Merge ${step.columns.join(' + ')} -> ${step.into}`,
+        sql: `CREATE OR REPLACE ${relationKind} ${dst} AS
+SELECT *, ${expr} AS ${ident(step.into)}
+FROM ${src};`,
+      };
+    }
+    case 'fillNulls': {
+      const col = ident(step.column);
+      if (step.strategy === 'ffill') {
+        return {
+          label: `Fill nulls (${step.column}, forward-fill)`,
+          sql: `CREATE OR REPLACE TABLE ${dst} AS
+SELECT * REPLACE (
+  coalesce(${col}, last_value(${col} IGNORE NULLS) OVER (ORDER BY "__rid" ASC ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)) AS ${col}
+)
+FROM ${src}
+ORDER BY "__rid" ASC;`,
+        };
+      }
+      if (step.strategy === 'mean' || step.strategy === 'median') {
+        const agg = step.strategy === 'mean' ? 'avg' : 'median';
+        return {
+          label: `Fill nulls (${step.column}, ${step.strategy})`,
+          sql: `CREATE OR REPLACE ${relationKind} ${dst} AS
+SELECT * REPLACE (
+  coalesce(try_cast(${col} AS DOUBLE), ${agg}(try_cast(${col} AS DOUBLE)) OVER ()) AS ${col}
+)
+FROM ${src};`,
+        };
+      }
+      return {
+        label: `Fill nulls (${step.column}, value)`,
+        sql: `CREATE OR REPLACE ${relationKind} ${dst} AS
+SELECT * REPLACE (coalesce(${col}::VARCHAR, ${lit(String(step.value ?? ''))}) AS ${col})
+FROM ${src};`,
+      };
+    }
+    case 'parseDate': {
+      const col = ident(step.column);
+      const expr = castColumnExpr({ name: step.column, targetType: 'DATE' }, step.format);
+      return {
+        label: `Parse date ${step.column} (${step.format})`,
+        sql: `CREATE OR REPLACE ${relationKind} ${dst} AS
+SELECT * REPLACE (${expr} AS ${col})
+FROM ${src};`,
+      };
+    }
+    case 'parseNumber': {
+      const col = ident(step.column);
+      const expr = castColumnExpr(
+        { name: step.column, targetType: 'DOUBLE', localeNumberFormat: step.locale },
+        'ISO',
+      );
+      return {
+        label: `Parse number ${step.column} (${step.locale})`,
+        sql: `CREATE OR REPLACE ${relationKind} ${dst} AS
+SELECT * REPLACE (${expr} AS ${col})
+FROM ${src};`,
+      };
+    }
+    case 'rawSql': {
+      const cleanSelect = step.sql.trim().replace(/;\s*$/, '');
+      return {
+        label: `Raw SQL -> ${step.as}`,
+        sql: `CREATE OR REPLACE ${relationKind} ${ident(step.as)} AS\n${cleanSelect};`,
+      };
+    }
     case 'dedupe': {
       const partKeys = step.keys
         .map((k) => `lower(trim(coalesce(${ident(k)}::VARCHAR, '')))`)

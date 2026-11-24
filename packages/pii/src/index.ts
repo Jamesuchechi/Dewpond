@@ -1,11 +1,16 @@
 export {
+  evaluateDetectorMetrics,
+  formatRedactionReportMarkdown,
   isE164Phone,
   isElevenDigitId,
   isEmail,
   isNigerianPhone,
   isValidLuhn,
   scanColumnSample,
+  type DetectorEvalCase,
+  type DetectorEvalMetrics,
   type PiiConfidence,
   type PiiDetectorKind,
   type PiiFinding,
+  type RedactionAuditReport,
 } from './detectors';

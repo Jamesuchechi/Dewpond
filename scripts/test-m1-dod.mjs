@@ -126,7 +126,10 @@ async function generateFiveHundredMbParquet(workDir) {
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   const port = server.address().port;
   const genUrl = `http://127.0.0.1:${port}`;
-  const browser = await chromium.launch({ headless: true });
+  const browser = await chromium.launch({
+    headless: true,
+    args: ['--disable-dev-shm-usage'],
+  });
 
   try {
     const page = await browser.newPage();
@@ -190,19 +193,20 @@ async function generateFiveHundredMbParquet(workDir) {
         ) TO '_full_500mb.parquet' (FORMAT PARQUET, COMPRESSION SNAPPY, ROW_GROUP_SIZE 100000);
       `);
 
-      const fullBuf = new Uint8Array(await db.copyFileToBuffer('_full_500mb.parquet'));
+      await c.close();
+      const fullBuf = await db.copyFileToBuffer('_full_500mb.parquet');
       await db.dropFile('_full_500mb.parquet');
+      const totalBytes = fullBuf.byteLength;
       const chunkBytes = 32 * 1024 * 1024;
-      for (let off = 0; off < fullBuf.byteLength; off += chunkBytes) {
-        const slice = fullBuf.subarray(off, Math.min(off + chunkBytes, fullBuf.byteLength));
+      for (let off = 0; off < totalBytes; off += chunkBytes) {
+        const slice = fullBuf.subarray(off, Math.min(off + chunkBytes, totalBytes));
         const res = await fetch(`${origin}/_chunk`, { method: 'POST', body: slice });
         if (!res.ok) throw new Error(`Chunk upload failed: ${res.status}`);
       }
 
-      await c.close();
       await db.terminate();
       w.terminate();
-      return { rows: targetRows, bytes: fullBuf.byteLength };
+      return { rows: targetRows, bytes: totalBytes };
     }, genUrl);
 
     await new Promise((r) => outStream.end(r));
@@ -309,7 +313,9 @@ async function runM1Browser(name, browserType, fixtures) {
     await page.locator('.wb-engine-pill', { hasText: 'Ready (' }).waitFor({ timeout: 30000 });
 
     // (a1) XLSX (merges + cached formulas + hidden sheet)
-    await page.locator('input[type="file"]').setInputFiles(fixtures.xlsx.xlsx1900Path);
+    await page
+      .locator('input[type="file"][accept*=".csv"]')
+      .setInputFiles(fixtures.xlsx.xlsx1900Path);
     await page
       .getByRole('button', { name: 'Commit Typed Load into DuckDB' })
       .waitFor({ timeout: 20000 });
@@ -326,7 +332,7 @@ async function runM1Browser(name, browserType, fixtures) {
 
     // (a2) Win-1252 CSV + _rejects quarantine test on demo dataset with amount -> DOUBLE
     await page.getByRole('tab', { name: 'Data Grid' }).click();
-    await page.locator('input[type="file"]').setInputFiles(fixtures.xlsx.winPath);
+    await page.locator('input[type="file"][accept*=".csv"]').setInputFiles(fixtures.xlsx.winPath);
     await page.locator('.wb-tag', { hasText: 'windows-1252' }).waitFor({ timeout: 10000 });
     await page.getByRole('button', { name: 'Commit Typed Load into DuckDB' }).click();
     await page
@@ -353,13 +359,15 @@ async function runM1Browser(name, browserType, fixtures) {
     );
 
     // (b) 50 MB CSV (385k x 15) -> Commit + Profile < 3 s
-    await page.getByRole('button', { name: 'Wipe Session' }).click();
+    await page.getByRole('button', { name: /Wipe (Session|all local data)/i }).click();
     await page
       .locator('.wb-empty-note', { hasText: 'No tables committed yet.' })
       .waitFor({ timeout: 10000 });
 
     const sampleStart = Date.now();
-    await page.locator('input[type="file"]').setInputFiles(fixtures.fiftyMb.filePath);
+    await page
+      .locator('input[type="file"][accept*=".csv"]')
+      .setInputFiles(fixtures.fiftyMb.filePath);
     await page
       .getByRole('button', { name: 'Commit Typed Load into DuckDB' })
       .waitFor({ timeout: 30000 });
@@ -384,12 +392,14 @@ async function runM1Browser(name, browserType, fixtures) {
     assert(profile50Ms < 3000, `${name}: 50 MB CSV profile exceeded 3s DoD (${profile50Ms} ms)`);
 
     // (c) 500 MB Parquet lazy mode (< 25 MB DuckDB RAM)
-    await page.getByRole('button', { name: 'Wipe Session' }).click();
+    await page.getByRole('button', { name: /Wipe (Session|all local data)/i }).click();
     await page
       .locator('.wb-empty-note', { hasText: 'No tables committed yet.' })
       .waitFor({ timeout: 10000 });
 
-    await page.locator('input[type="file"]').setInputFiles(fixtures.parquet.filePath);
+    await page
+      .locator('input[type="file"][accept*=".csv"]')
+      .setInputFiles(fixtures.parquet.filePath);
     await page
       .locator('.wb-table-item strong', { hasText: 'm1_500mb' })
       .waitFor({ timeout: 30000 });

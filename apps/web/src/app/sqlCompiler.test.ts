@@ -89,4 +89,35 @@ describe('workbench sqlCompiler', () => {
     const riskSql = buildKAnonymityQuery('payroll@s2', ['department', 'tx_month'], 5);
     expect(riskSql).toContain('HAVING count(*) < 5');
   });
+
+  it('compiles all core M2 clean ops with checkpoint support and __rid ordering', () => {
+    const ffill = compileCleanStepSql('t', 't@s1', {
+      id: 's1',
+      op: 'fillNulls',
+      table: 't',
+      column: 'amount',
+      strategy: 'ffill',
+    });
+    expect(ffill.sql).toContain('CREATE OR REPLACE TABLE "t@s1"');
+    expect(ffill.sql).toContain('ORDER BY "__rid" ASC');
+
+    const split = compileCleanStepSql('t', 't@s2', {
+      id: 's2',
+      op: 'split',
+      table: 't',
+      column: 'full_name',
+      delimiter: ' ',
+      into: ['first_name', 'last_name'],
+    });
+    expect(split.sql).toContain('CREATE OR REPLACE VIEW "t@s2"');
+    expect(split.sql).toContain('AS "first_name"');
+
+    const ckpt = compileCleanStepSql(
+      't',
+      't@s5',
+      { id: 's5', op: 'case', table: 't', columns: ['city'], mode: 'title' },
+      { checkpoint: true },
+    );
+    expect(ckpt.sql).toContain('CREATE OR REPLACE TABLE "t@s5"');
+  });
 });

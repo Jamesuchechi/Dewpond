@@ -103,6 +103,61 @@ export type Step =
       column: string;
       search: string;
       replacement: string;
+    }
+  | { id: StepId; op: 'reorder'; table: TableId; columns: string[] }
+  | {
+      id: StepId;
+      op: 'case';
+      table: TableId;
+      columns: string[];
+      mode: 'lower' | 'upper' | 'title';
+    }
+  | {
+      id: StepId;
+      op: 'regexExtract';
+      table: TableId;
+      column: string;
+      pattern: string;
+      into: string;
+      group?: number;
+    }
+  | {
+      id: StepId;
+      op: 'split';
+      table: TableId;
+      column: string;
+      delimiter: string;
+      into: string[];
+    }
+  | {
+      id: StepId;
+      op: 'merge';
+      table: TableId;
+      columns: string[];
+      separator: string;
+      into: string;
+    }
+  | {
+      id: StepId;
+      op: 'fillNulls';
+      table: TableId;
+      column: string;
+      strategy: 'value' | 'mean' | 'median' | 'ffill';
+      value?: string | number | boolean;
+    }
+  | {
+      id: StepId;
+      op: 'parseDate';
+      table: TableId;
+      column: string;
+      format: 'DMY' | 'MDY' | 'ISO';
+    }
+  | {
+      id: StepId;
+      op: 'parseNumber';
+      table: TableId;
+      column: string;
+      locale: 'us_currency' | 'eu_decimal';
     };
 
 export interface Recipe {

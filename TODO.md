@@ -67,30 +67,30 @@ All Milestone S spikes (S1–S9) plus replacement verification checks (R1–R3) 
 
 ---
 
-## Milestone M2 — Recipe + Clean + Local Persistence (Weeks 5–6, ⏱10.5d)
+## Milestone M2 — Recipe + Clean + Local Persistence (Weeks 5–6, ⏱10.5d) (COMPLETED)
 
-- [ ] P0 `Step` union + JSON Schema validator + share-safe literal checker 🔒 ⏱1.5d
-- [ ] P0 Deterministic SQL compiler (`sqlkit.ident`/`lit`, `, "__rid" ASC` tiebreakers, view-by-default + checkpoint policy, `head` undo/redo) ⏱2.5d
-- [ ] P0 Core clean actions (filter, derive, cast, rename, drop, reorder, trim, case, replace, regex extract, split/merge, fill nulls, parse dates/locale numbers, exact dedupe) ⏱3d
-- [ ] P0 Timeline panel, live SQL preview, `.sql` & `.dew.json` export/import + schema-drift column mapper ⏱1.5d
-- [ ] P0 `rawSql` statement classifier + `sqlkit` path/URL/function allowlist (NO `enable_external_access=false`) + 2 MB stream-capped `#r=` decoder 🔒 ⏱1d
-- [ ] P0 Autosave Recipes to IndexedDB + explicit OPFS workspace snapshots (`:memory:` fallback banner) + **"Wipe all local data"** 🔒 ⏱1d
+- [x] P0 `Step` union + JSON Schema validator + share-safe literal checker 🔒 ⏱1.5d
+- [x] P0 Deterministic SQL compiler (`sqlkit.ident`/`lit`, `, "__rid" ASC` tiebreakers, view-by-default + checkpoint policy, `head` undo/redo) ⏱2.5d
+- [x] P0 Core clean actions (filter, derive, cast, rename, drop, reorder, trim, case, replace, regex extract, split/merge, fill nulls, parse dates/locale numbers, exact dedupe) ⏱3d
+- [x] P0 Timeline panel, live SQL preview, `.sql` & `.dew.json` export/import + schema-drift column mapper ⏱1.5d
+- [x] P0 `rawSql` statement classifier + `sqlkit` path/URL/function allowlist (NO `enable_external_access=false`) + 2 MB stream-capped `#r=` decoder 🔒 ⏱1d
+- [x] P0 Autosave Recipes to IndexedDB + explicit OPFS workspace snapshots (`:memory:` fallback banner) + **"Wipe all local data"** 🔒 ⏱1d
 
-**DoD (M2):** 10-step Recipe replays identically across fresh reloads; hostile column names and hostile shared Recipes pass security suite; reload restores workspace in Chrome/Firefox.
+**DoD (M2):** 10-step Recipe replays identically across fresh reloads (`pnpm run test:m2` on Chromium & Firefox); hostile column names, hostile SQL (`packages/sqlkit/src/sqlkit.test.ts`), and hostile/oversized `#r=` shared Recipes (`packages/recipe/src/recipe.test.ts`) pass security suite; reload restores workspace and `Wipe all local data` clears IndexedDB/OPFS/SW caches.
 
 ---
 
-## Milestone M3 + V1 — Redact Headline Wedge, Export, & Launch (Weeks 7–8, ⏱9d)
+## Milestone M3 + V1 — Redact Headline Wedge, Export, & Launch (Weeks 7–8, ⏱9d) (COMPLETED)
 
 ### Headline Workflow *(D4 locked: Redact in v1; Diff moves to v1.1)*
-- [ ] P0 **Redact (`packages/pii`):** Luhn/NG-phone/email/ID detectors with precision/recall fixtures, mask / salted `sha256` / generalize / deterministic hash-shuffle / drop, k-anonymity residual-risk check, raw-value-free JSON/MD report ⏱3.5d
+- [x] P0 **Redact (`packages/pii`):** Luhn/NG-phone/email/ID detectors with precision/recall fixtures, mask / salted `sha256` / generalize / deterministic hash-shuffle / drop, k-anonymity residual-risk check, raw-value-free JSON/MD report ⏱3.5d
 
 ### Export, Audit, & Launch
-- [ ] P0 CSV / JSON / NDJSON / Parquet (`parquet-wasm` / `hyparquet-writer` — do not rely on raw DuckDB-WASM `COPY TO PARQUET`) / streaming ≤ 50 MB XLSX export (text preserved, formula-neutralization toggle) 🔒 ⏱2d
-- [ ] P0 Cross-browser E2E matrix (Chromium/Firefox/WebKit, network-blocked + offline), perf-budget CI, crash recovery test ⏱1.5d
-- [ ] P0 Complete [`docs/audit.md`](./docs/audit.md) (60-second DevTools audit + reproducible `dist/` SHA-256 attestation) + sample synthetic datasets + launch write-up ⏱2.5d
+- [x] P0 CSV / JSON / NDJSON / Parquet (`parquet-wasm` / `hyparquet-writer` — do not rely on raw DuckDB-WASM `COPY TO PARQUET`) / streaming ≤ 50 MB XLSX export (text preserved, formula-neutralization toggle) 🔒 ⏱2d
+- [x] P0 Cross-browser E2E matrix (Chromium/Firefox/WebKit, network-blocked + offline), perf-budget CI, crash recovery test ⏱1.5d
+- [x] P0 Complete [`docs/audit.md`](./docs/audit.md) (60-second DevTools audit + reproducible `dist/` SHA-256 attestation) + sample synthetic datasets + launch write-up ⏱2.5d
 
-**DoD (V1):** Every milestone DoD green; stranger can run the 60-second audit and reproduce the `dist/` SHA-256 digest.
+**DoD (V1):** Every milestone DoD green (`pnpm run check`, `pnpm run format:check`, `pnpm run test:e2e`, `pnpm run test:m1`, `pnpm run test:m2`, and `pnpm run test:m3` across Chromium, Firefox, & WebKit); stranger can run the 60-second audit in [`docs/audit.md`](./docs/audit.md) and reproduce the `dist/` SHA-256 digest.
 
 ---
 

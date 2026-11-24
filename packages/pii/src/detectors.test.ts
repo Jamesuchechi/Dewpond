@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
+  evaluateDetectorMetrics,
+  formatRedactionReportMarkdown,
   isE164Phone,
   isElevenDigitId,
   isEmail,
@@ -39,5 +41,54 @@ describe('@dewpond/pii', () => {
 
     const unhinted = scanColumnSample('code', ['22123456789', '22987654321']);
     expect(unhinted.find((f) => f.detector === 'eleven_digit_id')?.confidence).toBe('medium');
+  });
+
+  it('meets precision/recall >= 0.95 across synthetic PII fixtures and renders raw-value-free MD report', () => {
+    const luhnCases = [
+      { value: '4111111111111111', expected: true },
+      { value: '5500000000000004', expected: true },
+      { value: '378282246310005', expected: true },
+      { value: '4111111111111112', expected: false },
+      { value: '123456789012', expected: false },
+      { value: 'ORD-2026-0001', expected: false },
+    ];
+    const luhnMetrics = evaluateDetectorMetrics(luhnCases, isValidLuhn);
+    expect(luhnMetrics.precision).toBe(1);
+    expect(luhnMetrics.recall).toBe(1);
+
+    const ngPhoneCases = [
+      { value: '08031234567', expected: true },
+      { value: '+2348091234567', expected: true },
+      { value: '09123456789', expected: true },
+      { value: '06012345678', expected: false },
+      { value: '12345', expected: false },
+    ];
+    const phoneMetrics = evaluateDetectorMetrics(ngPhoneCases, isNigerianPhone);
+    expect(phoneMetrics.precision).toBe(1);
+    expect(phoneMetrics.recall).toBe(1);
+
+    const md = formatRedactionReportMarkdown({
+      generatedAt: '2026-11-24T10:00:00.000Z',
+      tableAlias: 'payroll@s1',
+      rowCount: 1200,
+      containsRawCellValues: false,
+      detectors: [
+        {
+          columnName: 'email',
+          detector: 'email',
+          matchCount: 1200,
+          nonNullCount: 1200,
+          matchRate: 1,
+          confidence: 'high',
+        },
+      ],
+      appliedActions: [{ columnName: 'email', mode: 'hash_sha256' }],
+      kAnonymityThreshold: 5,
+      quasiIdentifiers: ['department'],
+      smallCohortsDetected: 0,
+    });
+    expect(md).toContain('# Dewpond Local Redaction & Privacy Audit Report');
+    expect(md).toContain('`false`');
+    expect(md).toContain('`hash_sha256`');
   });
 });

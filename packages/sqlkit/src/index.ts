@@ -1,2 +1,7 @@
 export { ident, lit } from './ident';
-export { validateReadOnlySql, type SqlSafetyResult } from './safety';
+export {
+  classifySqlStatement,
+  validateReadOnlySql,
+  type SqlSafetyResult,
+  type SqlStatementClass,
+} from './safety';

@@ -125,3 +125,90 @@ export function scanColumnSample(
 
   return findings;
 }
+
+export interface DetectorEvalCase {
+  value: string;
+  expected: boolean;
+}
+
+export interface DetectorEvalMetrics {
+  truePositives: number;
+  falsePositives: number;
+  falseNegatives: number;
+  precision: number;
+  recall: number;
+}
+
+/** Evaluate precision and recall of a PII detector against labeled synthetic cases. */
+export function evaluateDetectorMetrics(
+  cases: readonly DetectorEvalCase[],
+  predicate: (value: string) => boolean,
+): DetectorEvalMetrics {
+  let tp = 0;
+  let fp = 0;
+  let fn = 0;
+  for (const c of cases) {
+    const predicted = predicate(c.value);
+    if (predicted && c.expected) tp++;
+    else if (predicted && !c.expected) fp++;
+    else if (!predicted && c.expected) fn++;
+  }
+  const precision = tp + fp === 0 ? 1 : tp / (tp + fp);
+  const recall = tp + fn === 0 ? 1 : tp / (tp + fn);
+  return { truePositives: tp, falsePositives: fp, falseNegatives: fn, precision, recall };
+}
+
+export interface RedactionAuditReport {
+  generatedAt: string;
+  tableAlias: string;
+  rowCount: number;
+  containsRawCellValues: false;
+  detectors: readonly PiiFinding[];
+  appliedActions: ReadonlyArray<{ columnName: string; mode: string }>;
+  kAnonymityThreshold: number;
+  quasiIdentifiers: readonly string[];
+  smallCohortsDetected: number | null;
+}
+
+/** Render a raw-value-free Markdown redaction & k-anonymity audit report. */
+export function formatRedactionReportMarkdown(report: RedactionAuditReport): string {
+  const lines: string[] = [
+    '# Dewpond Local Redaction & Privacy Audit Report',
+    '',
+    `- **Generated At:** ${report.generatedAt}`,
+    `- **Table Alias:** \`${report.tableAlias}\``,
+    `- **Row Count:** ${report.rowCount.toLocaleString('en-US')}`,
+    `- **Contains Raw Cell Values:** \`${String(report.containsRawCellValues)}\``,
+    '',
+    '## Detected PII Signals',
+    '',
+    '| Column | Detector | Matches | Non-Nulls | Match Rate | Confidence |',
+    '| --- | --- | ---: | ---: | ---: | --- |',
+  ];
+
+  if (report.detectors.length === 0) {
+    lines.push('| _none_ | - | 0 | 0 | 0% | - |');
+  } else {
+    for (const f of report.detectors) {
+      lines.push(
+        `| \`${f.columnName}\` | \`${f.detector}\` | ${f.matchCount} | ${f.nonNullCount} | ${Math.round(f.matchRate * 100)}% | ${f.confidence} |`,
+      );
+    }
+  }
+
+  lines.push('', '## Applied Redaction Actions', '');
+  lines.push('| Column | Mode |', '| --- | --- |');
+  for (const a of report.appliedActions) {
+    lines.push(`| \`${a.columnName}\` | \`${a.mode}\` |`);
+  }
+
+  lines.push('', '## k-Anonymity Residual Risk Check', '');
+  lines.push(
+    `- **Minimum Cohort Threshold (k):** ${report.kAnonymityThreshold}`,
+    `- **Quasi-Identifiers:** ${report.quasiIdentifiers.length > 0 ? report.quasiIdentifiers.map((c) => `\`${c}\``).join(', ') : '_none selected_'}`,
+    `- **Small Cohorts (< k):** ${report.smallCohortsDetected === null ? 'Not run' : String(report.smallCohortsDetected)}`,
+    '',
+  );
+
+  return lines.join('\n');
+}

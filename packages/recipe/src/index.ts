@@ -17,4 +17,17 @@ export type {
   StepId,
   TableId,
 } from './types';
-export { findShareUnsafeLiterals, type ShareLiteralFinding } from './share';
+export {
+  SHARE_DECODE_MAX_BYTES,
+  decodeShareRecipe,
+  encodeShareRecipe,
+  findShareUnsafeLiterals,
+  type ShareLiteralFinding,
+} from './share';
+export {
+  RECIPE_JSON_SCHEMA,
+  detectSchemaDrift,
+  remapRecipeColumns,
+  validateRecipeJson,
+  type RecipeValidationResult,
+} from './validate';

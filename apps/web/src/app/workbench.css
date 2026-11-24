@@ -79,7 +79,8 @@ pre,
 }
 
 .wb-studio {
-  min-height: 100vh;
+  height: 100vh;
+  overflow: hidden;
   display: flex;
   flex-direction: column;
 }
@@ -220,6 +221,8 @@ pre,
   padding: 0.95rem;
   background: var(--wb-surface);
   border-right: 1px solid var(--wb-border);
+  min-height: 0;
+  overflow-y: auto;
 }
 
 .wb-explorer-actions {
@@ -316,6 +319,7 @@ pre,
   gap: 1rem;
   padding: 1rem 1.15rem;
   min-width: 0;
+  min-height: 0;
   overflow-y: auto;
 }
 
@@ -824,8 +828,8 @@ pre,
 
 .wb-table-scroll {
   flex: 1;
+  min-height: 0;
   overflow: auto;
-  max-height: 440px;
 }
 
 .wb-data-table {
@@ -894,6 +898,29 @@ pre,
   white-space: pre-wrap;
 }
 
+.wb-live-sql {
+  margin-top: 0.75rem;
+}
+
+.wb-drawer-persistence {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.wb-drawer-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.4rem;
+}
+
+.wb-drift-box {
+  display: grid;
+  gap: 0.5rem;
+  padding: 0.75rem;
+  border-radius: 8px;
+  border: 1px solid var(--wb-border);
+  background: var(--wb-surface-muted);
+}
 /* Right Recipe Drawer */
 .wb-drawer {
   display: flex;
@@ -902,6 +929,8 @@ pre,
   padding: 0.95rem;
   background: var(--wb-surface);
   border-left: 1px solid var(--wb-border);
+  min-height: 0;
+  overflow-y: auto;
 }
 
 .wb-drawer-head {
@@ -1079,7 +1108,8 @@ pre,
   }
 
   .wb-explorer,
-  .wb-drawer {
+  /* Right Recipe Drawer */
+.wb-drawer {
     border-left: 0;
     border-right: 0;
     border-bottom: 1px solid var(--wb-border);

@@ -26,6 +26,13 @@ const ALLOWED_INERT_URLS = new Set([
   'http://www.w3.org/1999/xlink',
   'http://www.w3.org/1998/Math/MathML',
   'http://www.w3.org/XML/1998/namespace',
+  // Inert OOXML XML namespace URIs used by the local XLSX exporter
+  'http://schemas.openxmlformats.org/spreadsheetml/2006/main',
+  'http://schemas.openxmlformats.org/officeDocument/2006/relationships',
+  'http://schemas.openxmlformats.org/package/2006/content-types',
+  'http://schemas.openxmlformats.org/package/2006/relationships',
+  'http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument',
+  'http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet',
   'https://react.dev/errors',
   // Inert repository.url metadata compiled from @duckdb/duckdb-wasm@1.32.0's package.json
   'https://github.com/duckdb/duckdb-wasm.git',
